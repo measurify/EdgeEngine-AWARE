@@ -18,6 +18,7 @@ from gymnasium import spaces
 from .actions import N_FLAT_ACTIONS, flatten_action, unflatten_action
 from .env import EdgeEngineAwareEnv
 from .interfaces import Policy
+from .observation import OBSERVATION_FIELDS
 from .policies import run_episode
 from .scenarios import SCENARIOS, get_scenario
 
@@ -301,3 +302,48 @@ class NumpyMLPPolicy:
 
 
 __all__ += ["export_sb3_mlp", "NumpyMLPPolicy"]
+
+
+# ---------------------------------------------------------------------------
+# Memory: frame stacking (mirrors stable_baselines3 VecFrameStack for 1-D obs)
+# ---------------------------------------------------------------------------
+class FrameStacker:
+    """Keep the last ``n_stack`` observations concatenated (oldest first).
+
+    Identical to SB3's ``VecFrameStack`` for 1-D observations: the buffer is
+    zero-filled at reset and shifted left at every step. On a microcontroller
+    this is a ring buffer of ``n_stack`` observation vectors.
+    """
+
+    def __init__(self, n_stack: int, obs_dim: int):
+        self.n_stack, self.obs_dim = int(n_stack), int(obs_dim)
+        self.reset()
+
+    def reset(self) -> None:
+        self._buf = np.zeros(self.n_stack * self.obs_dim, dtype=np.float32)
+
+    def push(self, observation) -> np.ndarray:
+        o = np.asarray(observation, dtype=np.float32).reshape(-1)
+        self._buf = np.concatenate([self._buf[self.obs_dim:], o])
+        return self._buf.copy()
+
+
+class StackedPolicy:
+    """Wrap any ``Policy`` that expects a stacked observation (e.g. an
+    :class:`SB3Policy` of a model trained with ``VecFrameStack``, or a
+    :class:`NumpyMLPPolicy` exported from it) so that it can be used where a
+    plain observation is provided (``run_episode``, ``evaluate``, the firmware loop)."""
+
+    def __init__(self, inner: Policy, n_stack: int, obs_dim: int = len(OBSERVATION_FIELDS)):
+        self.inner = inner
+        self.stacker = FrameStacker(n_stack, obs_dim)
+
+    def reset(self) -> None:
+        self.stacker.reset()
+        self.inner.reset()
+
+    def act(self, observation) -> np.ndarray:
+        return self.inner.act(self.stacker.push(observation))
+
+
+__all__ += ["FrameStacker", "StackedPolicy"]

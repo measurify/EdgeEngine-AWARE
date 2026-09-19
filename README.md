@@ -43,11 +43,13 @@ edgeengine_aware/
   policies.py        RuleBasedPolicy, RandomPolicy, PeriodicPolicy, AlwaysOnPolicy, run_episode
   deployment.py      NodeController (firmware loop), mock hardware backend, PolicyBundle export
   scenarios.py       named benchmark scenarios (default, cloudy_week, tiny_battery, lossy_link, drought, demanding_application)
-  rl.py              RL helpers: FlatActionWrapper (Discrete(6)), SB3Policy adapter, evaluation protocol,
-                     MLP export (SB3 -> lists) and a numpy-only runtime for exported policies
+  rl.py              RL helpers: FlatActionWrapper (Discrete(6)), MixedScenarioEnv, SB3Policy adapter, evaluation
+                     protocol, MLP export (SB3 -> lists), numpy-only runtime, FrameStacker / StackedPolicy
 examples/
   baseline_policy.ipynb   lecture notebook: environment tour, rule-based episode, metrics, comparisons
-  train_rl.ipynb          training PPO and DQN, learning curves, full scenario comparison, behaviour analysis, export
+  train_rl.ipynb          training PPO and DQN, learning curves, full scenario comparison, behaviour analysis, export,
+                          multi-seed robustness study, memory (frame stacking / recurrent PPO)
+  train_seeds.py          train + evaluate one (algorithm, seed) pair; the notebook launches and aggregates these runs
   build_notebook.py / build_rl_notebook.py   regenerate the notebooks
   compare_policies.py     headless comparison of the baselines
 tests/
@@ -72,8 +74,8 @@ Python ≥ 3.11.
 git clone <this repository> && cd edgeengine_aware
 python -m venv .venv && source .venv/bin/activate      # optional
 pip install -e ".[dev]"                                 # numpy, gymnasium, matplotlib, pytest, jupyter
-pip install -e ".[rl]"                                  # + stable-baselines3, torch (only for examples/train_rl.ipynb)
-pytest                                                  # 54 tests, ~7 s
+pip install -e ".[rl]"                                  # + stable-baselines3, sb3-contrib, torch (only for examples/train_rl.ipynb)
+pytest                                                  # 57 tests, ~7 s
 ```
 
 ## Quick start
@@ -165,10 +167,11 @@ physical parameters is one switch away. Details: `docs/sim_to_real.md`, `docs/de
 
 The environment follows the Gymnasium API and works unchanged with Stable-Baselines3
 (`PPO`/`A2C` accept `MultiDiscrete`; `rl.FlatActionWrapper` exposes `Discrete(6)` for DQN).
-`examples/train_rl.ipynb` is the reference protocol: it trains PPO and DQN with domain
-randomisation, compares them with the baselines on the six scenarios of `scenarios.py` over
-held-out seeds, analyses the learned behaviour and exports the actor as a `PolicyBundle`
-whose numpy-only runtime (`rl.NumpyMLPPolicy`) reproduces the SB3 actions exactly.
+`examples/train_rl.ipynb` is the reference protocol: it trains PPO and DQN on a mixture of the
+six scenarios of `scenarios.py` with domain randomisation, compares them with the baselines on
+held-out seeds, analyses the learned behaviour, exports the actor as a `PolicyBundle` whose
+numpy-only runtime (`rl.NumpyMLPPolicy`) reproduces the SB3 actions exactly, repeats training
+over several seeds (`examples/train_seeds.py`) and tests memory (frame stacking, recurrent PPO).
 
 ```python
 from stable_baselines3 import PPO

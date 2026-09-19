@@ -69,3 +69,68 @@ def test_sb3_export_matches_model_if_available():
     for _ in range(100):
         assert np.array_equal(runtime.act(obs), ref.act(obs))
         obs, *_ = env.step(env.action_space.sample())
+
+
+def test_frame_stacker_matches_vec_frame_stack():
+    sb3 = pytest.importorskip("stable_baselines3")
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+
+    from edgeengine_aware.rl import FrameStacker, make_env_fn
+
+    venv = VecFrameStack(DummyVecEnv([make_env_fn("default", randomize=False, seed=0)]), n_stack=4)
+    venv.seed(5)
+    stacked = venv.reset()
+    env = make_env("default")
+    obs, _ = env.reset(seed=5)
+    fs = FrameStacker(4, 17)
+    assert np.allclose(stacked[0], fs.push(obs))
+    for k in range(20):
+        a = np.array([[2, 1]]) if k % 3 == 0 else np.array([[0, 0]])
+        stacked, *_ = venv.step(a)
+        obs, *_ = env.step(a[0])
+        assert np.allclose(stacked[0], fs.push(obs))
+    assert sb3 is not None
+
+
+def test_stacked_policy_wraps_plain_policy():
+    from edgeengine_aware.rl import StackedPolicy
+
+    class Probe:
+        def __init__(self):
+            self.dims = []
+
+        def reset(self):
+            pass
+
+        def act(self, o):
+            self.dims.append(len(o))
+            return np.array([0, 0])
+
+    inner = Probe()
+    pol = StackedPolicy(inner, 3)
+    env = make_env("default")
+    obs, _ = env.reset(seed=0)
+    pol.reset()
+    for _ in range(3):
+        obs, *_ = env.step(pol.act(obs))
+    assert inner.dims == [51, 51, 51]
+
+
+def test_rule_based_v2_is_lazier_when_battery_is_low():
+    from edgeengine_aware.observation import OBSERVATION_FIELDS
+
+    idx = {f.name: i for i, f in enumerate(OBSERVATION_FIELDS)}
+    pol = ea.RuleBasedPolicy()
+    obs = np.zeros(17, dtype=np.float32)
+    obs[idx["measurement_quality"]] = 0.8
+    obs[idx["measurement"]] = obs[idx["reported_value"]] = 0.5
+    obs[idx["measurement_age"]] = obs[idx["time_since_tx_success"]] = obs[idx["app_info_age"]] = 3.0 / 24  # 3 h
+    obs[idx["link_quality"]] = 1.0
+    obs[idx["battery_soc"]] = 0.8
+    assert np.array_equal(pol.act(obs), [2, 1])  # normal mode: 3 h > 2 h -> report
+    obs[idx["battery_soc"]] = 0.4
+    assert np.array_equal(pol.act(obs), [0, 0])  # economy: interval is 4 h -> wait, and no checks
+    obs[idx["battery_soc"]] = 0.1
+    assert np.array_equal(pol.act(obs), [0, 0])  # deep economy: 8 h
+    obs[idx["app_info_age"]] = 9.0 / 24
+    assert np.array_equal(pol.act(obs), [2, 1])  # ... but still a high-quality report when due

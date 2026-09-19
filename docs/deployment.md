@@ -114,6 +114,7 @@ plus the bundle, and nothing else in the package needs to change when it is adde
 | PPO / A2C (actor-critic) | SB3 `MlpPolicy` on the native `MultiDiscrete` space; `rl.SB3Policy` adapts the model to the `Policy` protocol | trained and evaluated in the notebook |
 | DQN family | `rl.FlatActionWrapper` → `Discrete(6)` | trained and evaluated in the notebook |
 | tabular (Q-learning / SARSA) | bin the 17 inputs with a `gym.ObservationWrapper`, use `flatten_action` | not implemented; a teaching exercise |
-| recurrent / frame-stacked policies | `VecFrameStack` or `RecurrentPPO` (sb3-contrib) around the same env | not implemented; the natural next step for the POMDP |
+| frame-stacked / recurrent policies | `VecFrameStack` (mirrored on the node by `rl.FrameStacker` / `rl.StackedPolicy`) or `RecurrentPPO` (sb3-contrib) | trained and evaluated in the notebook (section 9); `examples/train_seeds.py --algo ppo_stack|rppo` |
+| **multi-seed protocol** | `examples/train_seeds.py --algo <ppo|dqn|ppo_stack|rppo> --seed N` → JSON with evaluation rows and learning curve; the notebook aggregates mean ± std across runs | section 8 of the notebook |
 | **evaluation protocol** | `rl.evaluate(policies, scenarios, seeds)` → one `EvalRow` per episode; `rl.summarize` for mean ± std | six scenarios (`scenarios.SCENARIOS`), held-out seeds ≥ 1000, deterministic policies, nominal (non-randomised) physics |
 | **export check** | `rl.export_sb3_mlp` → `PolicyBundle.model`; `rl.NumpyMLPPolicy` re-executes it with numpy and must reproduce every SB3 action | part of the notebook and of `tests/test_rl.py` |

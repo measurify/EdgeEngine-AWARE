@@ -126,11 +126,13 @@ md(r"""
 same object can run inside the simulator or inside the firmware loop of
 `edgeengine_aware.deployment.NodeController`. Its rules (see the docstring):
 
-1. **Survival** — SoC below 15 %: sleep, unless the application is urgent and starving.
+1. **Deep economy** — SoC below 20 %: one high-quality report every 8 h, nothing else.
 2. **Retry** — a fresh high-quality sample that was not acknowledged is retransmitted.
 3. **Scheduled report** — when the information at the application is older than the
-   report interval (2 h routine / 1 h elevated / 30 min urgent; stretched when the
-   battery is low, shrunk when it is full or the sun is strong): high-quality sample + transmit.
+   report interval (2 h routine / 1 h elevated / 30 min urgent; doubled below 50 % SoC,
+   shortened when the battery is full or the sun is strong): high-quality sample + transmit.
+   Economy mode keeps the sample quality and saves energy by reporting less often — a cheap
+   noisy sample is worth little to the application, a missed hour is cheap.
 4. **Event report** — a cheap check that differs a lot from the reported value, or an
    important value near a stress threshold: high-quality sample + transmit now.
 5. **Check** — otherwise, a low-cost sample every hour (never in economy mode).

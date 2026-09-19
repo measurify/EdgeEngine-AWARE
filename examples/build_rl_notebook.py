@@ -35,7 +35,11 @@ What it does:
 5. runs the **full comparison** on all scenarios and shows where the learned policies win or lose;
 6. looks at **what the agent learned** (actions vs. battery, priority, time of day);
 7. **exports** the PPO actor as a `PolicyBundle` and checks that a numpy-only forward pass —
-   the same arithmetic a microcontroller would run — reproduces the SB3 actions exactly.
+   the same arithmetic a microcontroller would run — reproduces the SB3 actions exactly;
+8. repeats training over **several seeds** (via `examples/train_seeds.py`) and reports
+   mean ± std *across runs*, which is the number a paper should quote;
+9. tests whether **memory** helps on this POMDP: PPO with 4-frame stacking and a recurrent
+   PPO (LSTM) against the memoryless PPO.
 
 > **Runtime.** With the default budget (`BUDGET = "default"`: 2 M PPO steps, 1 M DQN steps,
 > 20 evaluation seeds) the notebook takes roughly 30–40 minutes on a laptop CPU (measured:
@@ -43,7 +47,9 @@ What it does:
 > `BUDGET = "quick"` for a 3-minute smoke test (the curves will look undertrained) or
 > `"paper"` for a longer, lower-variance run. Trained models are saved under `examples/rl_runs/`
 > and reused on the next run of the same budget unless `EEA_RETRAIN=1` is set, so the analysis
-> cells can be re-run in a few minutes.
+> cells can be re-run in a few minutes. The multi-seed study (sections 8–9) is the expensive
+> part: about 1.5 h more with the default budget; its runs are also cached and can be added
+> one at a time from the command line.
 """)
 
 md(r"""
@@ -90,10 +96,14 @@ start at 1000 so they never overlap the training seeds (0–7).
 code(r"""
 BUDGET = os.environ.get("EEA_BUDGET", "default")      # "quick" | "default" | "paper"
 BUDGETS = {
-    "quick":   dict(ppo_steps=100_000,   dqn_steps=60_000,    eval_seeds=4,  n_envs=8, eval_every=25_000,  eval_episodes=6),
-    "default": dict(ppo_steps=2_000_000, dqn_steps=1_000_000, eval_seeds=20, n_envs=8, eval_every=100_000, eval_episodes=12),
-    "paper":   dict(ppo_steps=5_000_000, dqn_steps=2_000_000, eval_seeds=50, n_envs=8, eval_every=100_000, eval_episodes=24),
+    "quick":   dict(ppo_steps=100_000,   dqn_steps=60_000,    eval_seeds=4,  n_envs=8, eval_every=25_000,  eval_episodes=6,
+                    seed_runs={"ppo": (2, 30_000), "dqn": (2, 20_000), "ppo_stack": (2, 30_000), "rppo": (1, 10_000)}),
+    "default": dict(ppo_steps=2_000_000, dqn_steps=1_000_000, eval_seeds=20, n_envs=8, eval_every=100_000, eval_episodes=12,
+                    seed_runs={"ppo": (5, 1_000_000), "dqn": (5, 500_000), "ppo_stack": (5, 1_000_000), "rppo": (2, 500_000)}),
+    "paper":   dict(ppo_steps=5_000_000, dqn_steps=2_000_000, eval_seeds=50, n_envs=8, eval_every=100_000, eval_episodes=24,
+                    seed_runs={"ppo": (10, 2_000_000), "dqn": (10, 1_000_000), "ppo_stack": (10, 2_000_000), "rppo": (5, 1_000_000)}),
 }
+# seed_runs: {algo: (number of training seeds, steps per run)} for sections 8-9
 B = BUDGETS[BUDGET]
 EVAL_SEEDS = range(1000, 1000 + B["eval_seeds"])
 OUT = ROOT / "examples" / "rl_runs"; OUT.mkdir(exist_ok=True)
@@ -110,7 +120,7 @@ missing from a chart), thin marks, recessive grid, direct labels where they help
 
 code(r"""
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
-POLICY_ORDER = ["PPO", "DQN", "rule-based", "periodic 1h", "periodic 3h", "random"]
+POLICY_ORDER = ["PPO", "DQN", "rule-based", "periodic 1h", "periodic 3h", "random", "PPO + stack 4", "Recurrent PPO"]
 COLOR = {p: PALETTE[i] for i, p in enumerate(POLICY_ORDER)}   # colour follows the policy, not its rank
 INK, MUTED, GRID = "#0b0b0b", "#898781", "#e1e0d9"
 
@@ -176,10 +186,14 @@ print(); print_table(baseline_rows, "min_soc", "{:7.2f}")
 """)
 
 md(r"""
-The periodic duty cycle is a strong baseline on the nominal scenario and collapses
-where the energy budget shrinks (`cloudy_week`, `tiny_battery`): it has no notion of battery.
-The rule-based controller survives everywhere but pays for it with staler information.
-This is the gap a learned policy is supposed to close.
+The hourly duty cycle is a strong baseline on the nominal scenario and collapses where the
+energy budget shrinks (`cloudy_week`, `tiny_battery`): it has no notion of battery. The
+3-hourly one happens to match the cloudy budget and is hard to beat *there*, but it wastes
+the sunny weeks and is blind to the application (`lossy_link`, `drought`). The rule-based
+controller never collapses and, since its economy mode was revised (report less often but
+keep the sample quality, enter economy at 50 % SoC), it is the strongest baseline on most
+rows. That is the bar a learned policy has to clear on *every* row at once — a deliberately
+high one: beating a weak baseline proves nothing.
 """)
 
 md(r"""
@@ -358,7 +372,7 @@ def paired_delta(rows, ref="rule-based", metric="reward"):
     return out
 
 delta = paired_delta(ALL_ROWS)
-pols = [p for p in POLICY_ORDER if p != "rule-based" and p != "random"]
+pols = [p for p in POLICY_ORDER if p not in ("rule-based", "random") and p in delta[scen_names[0]]]
 M = np.array([[delta[s][p][0] for p in pols] for s in scen_names])
 SE = np.array([[delta[s][p][1] for p in pols] for s in scen_names])
 lim = min(np.max(np.abs(M)), 40.0)          # colour saturates at ±40 so one collapse does not wash out the rest
@@ -530,28 +544,235 @@ also the realistic one: a deployed node will see cloudy weeks.
 """)
 
 md(r"""
-## 8. Reading the results
+## 8. Robustness across training seeds
 
-Use the tables and the Δ-heatmap above to answer, scenario by scenario:
+Everything above comes from **one** training run per algorithm. RL results vary with the
+seed — initialisation, exploration, the order in which scenarios are drawn — so the number to
+quote is the mean ± std *across independent runs*. `examples/train_seeds.py` trains one
+(algorithm, seed) pair on the same mixture, keeps the best greedy checkpoint and evaluates it
+on all scenarios; the cell below launches the runs that are still missing for this budget
+(cached under `examples/rl_runs/seeds_<budget>/`) and then aggregates the JSON files. Each run prints
+one line when it finishes.
+""")
 
-1. **Does the learned policy beat the rule-based controller on the nominal `default`
-   scenario?** On a sunny week the reward is deliberately flat between sensible duty cycles,
-   so a small margin (or parity) here is expected; a large deficit means under-training.
-2. **Does it win where adaptivity matters?** `cloudy_week` and `tiny_battery` test energy
-   awareness, `drought` and `demanding_application` test application awareness, `lossy_link`
-   tests retransmission behaviour. A robust policy should not fall below the rule-based one
-   anywhere and should beat the fixed duty cycles clearly on the energy-limited scenarios.
-3. **Is the margin explained by the components?** A win obtained by cutting staleness while
-   keeping the battery penalty at zero is the intended behaviour; a win obtained by draining
-   the battery is not, even if the number is higher.
-4. **DQN vs PPO.** Similar scores mean the six-action Q-network is a viable embedded target;
-   a large gap suggests the problem benefits from the factored action heads or from
-   on-policy exploration.
+code(r"""
+import subprocess, json, glob
+SEEDS_DIR = OUT / f"seeds_{BUDGET}"; SEEDS_DIR.mkdir(exist_ok=True)   # one cache per budget
+ALGO_LABEL = {"ppo": "PPO", "dqn": "DQN", "ppo_stack": "PPO + stack 4", "rppo": "Recurrent PPO"}
 
-Next steps from here: longer training and several training seeds (report mean ± std over
-runs, not only over evaluation episodes), a frame-stacking or LSTM policy (the problem is a
-POMDP), harder scenarios in the mixture, and re-running this notebook as the regression
-protocol after every change to the reward or the models.
+def ensure_seed_runs(seed_runs, eval_seeds):
+    for algo, (n_seeds, steps) in seed_runs.items():
+        for seed in range(n_seeds):
+            if (SEEDS_DIR / f"{algo}_seed{seed}.json").exists():
+                continue
+            cmd = [sys.executable, str(ROOT / "examples" / "train_seeds.py"), "--algo", algo, "--seed", str(seed), "--steps", str(steps),
+                   "--eval-seeds", str(eval_seeds), "--out", str(SEEDS_DIR), "--threads", str(torch.get_num_threads()),
+                   "--eval-every", str(max(2_000, steps // 20)), "--eval-episodes", str(B["eval_episodes"])]
+            t0 = time.time()
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            tail = [l for l in res.stdout.strip().splitlines() if l.strip()][-1:] or [res.stderr.strip().splitlines()[-1] if res.stderr.strip() else "?"]
+            print(f"[{time.time()-t0:6.0f} s] {tail[0][:160]}")
+
+ensure_seed_runs(B["seed_runs"], B["eval_seeds"])
+
+def load_seed_runs():
+    runs = {}
+    for f in sorted(SEEDS_DIR.glob("*_seed*.json")):
+        d = json.loads(f.read_text())
+        runs.setdefault(d["algo"], []).append(d)
+    return runs
+
+RUNS = load_seed_runs()
+print({ALGO_LABEL[a]: f"{len(v)} runs x {v[0]['steps']:,} steps" for a, v in RUNS.items()})
+""")
+
+md(r"""
+### Learning curves, all seeds
+
+Thin lines are individual runs (greedy evaluation on the training mixture during training),
+the thick line their mean. Dashed lines: the reference policies on the same mixture.
+""")
+
+code(r"""
+algos_present = [a for a in ("ppo", "dqn", "ppo_stack", "rppo") if a in RUNS]
+fig, axes = plt.subplots(1, len(algos_present), figsize=(4.2 * len(algos_present), 4), sharey=True, squeeze=False)
+for ax, algo in zip(axes[0], algos_present):
+    label = ALGO_LABEL[algo]; curves = []
+    for d in RUNS[algo]:
+        x, y = np.array(d["curve"]["timesteps"]), np.array(d["curve"]["mean"])
+        ax.plot(x, y, color=COLOR[label], lw=0.8, alpha=0.45); curves.append((x, y))
+    L = min(len(c[1]) for c in curves)
+    ax.plot(curves[0][0][:L], np.mean([c[1][:L] for c in curves], axis=0), color=COLOR[label], lw=2.4, label=f"{label} (mean of {len(curves)})")
+    for name in ("rule-based", "periodic 3h"):
+        ax.axhline(ref[name][0], color=COLOR[name], lw=1.1, ls="--", label=name)
+    ax.set_ylim(-50, None); ax.legend(loc="lower right", fontsize=8)
+    tidy(ax, label, "environment steps", "greedy episode reward (mixture)" if algo == algos_present[0] else None)
+plt.tight_layout(); plt.show()
+""")
+
+md(r"""
+### Reward per scenario: mean ± std across runs
+
+Each dot is one training run (its mean reward over the held-out evaluation seeds of that
+scenario); the bar is the mean across runs. Baselines are drawn as reference lines — they
+have no training seed.
+""")
+
+code(r"""
+def per_run_scenario_means(runs):
+    # {algo: {scenario: [mean reward of run 1, run 2, ...]}}
+    out = {}
+    for algo, ds in runs.items():
+        for d in ds:
+            by = {}
+            for r in d["rows"]:
+                by.setdefault(r["scenario"], []).append(r["reward"])
+            for scen, v in by.items():
+                out.setdefault(algo, {}).setdefault(scen, []).append(float(np.mean(v)))
+    return out
+
+PR = per_run_scenario_means(RUNS)
+base_summ = summarize(baseline_rows, "reward")
+print(f"{'scenario':24s}" + "".join(f"{ALGO_LABEL[a]:>18s}" for a in algos_present) + f"{'rule-based':>14s}{'periodic 3h':>14s}")
+for scen in scen_names:
+    line = f"{scen:24s}"
+    for a in algos_present:
+        v = PR[a][scen]; line += f"{np.mean(v):9.1f} ± {np.std(v):4.1f}  "
+    line += f"{base_summ[scen]['rule-based'][0]:14.1f}{base_summ[scen]['periodic 3h'][0]:14.1f}"
+    print(line)
+
+fig, axes = plt.subplots(2, 3, figsize=(13, 6.5))
+for ax, scen in zip(axes.ravel(), scen_names):
+    for k, a in enumerate(algos_present):
+        v = np.array(PR[a][scen]); label = ALGO_LABEL[a]
+        ax.scatter(np.full(len(v), k) + np.linspace(-0.12, 0.12, len(v)), v, s=22, color=COLOR[label], zorder=3)
+        ax.hlines(v.mean(), k - 0.3, k + 0.3, color=COLOR[label], lw=2.5)
+    for name in ("rule-based", "periodic 3h"):
+        ax.axhline(base_summ[scen][name][0], color=COLOR[name], lw=1.1, ls="--", label=name)
+    ax.set_xticks(range(len(algos_present))); ax.set_xticklabels([ALGO_LABEL[a].replace(" + ", "\n+ ").replace("Recurrent ", "Rec.\n") for a in algos_present], fontsize=8.5)
+    ax.grid(axis="x", visible=False)
+    tidy(ax, scen.replace("_", " "))
+axes[0, 0].legend(loc="lower left", fontsize=8)
+fig.suptitle("Reward per scenario across training seeds (dot = one run, bar = mean)", x=0.01, ha="left", fontweight="bold")
+plt.tight_layout(); plt.show()
+""")
+
+md(r"""
+## 9. Does memory help? Frame stacking and a recurrent policy
+
+The observation is not a Markov state (see `docs/observation.md`): the weather regime, the
+channel state and the application's internal requests are hidden. Two standard remedies are
+compared with the memoryless PPO, on the same mixture and the same seeds:
+
+* **PPO + frame stacking (4)** — the last four observations concatenated (68 inputs). On a
+  microcontroller this is a ring buffer of four vectors; `rl.FrameStacker` reproduces SB3's
+  `VecFrameStack` exactly and `rl.StackedPolicy` wraps any policy with it.
+* **Recurrent PPO** (`sb3-contrib`, LSTM with 32 units) — memory learned end to end. Costlier
+  to train (~5×) and to deploy (a recurrent state to keep across sleep cycles), so it is run
+  on fewer seeds.
+
+If neither improves on plain PPO, the engineered summary statistics in the observation
+(EWMA of harvest, EWMA of ACKs, explicit ages) are already doing the job of memory — a useful
+finding for the embedded target.
+""")
+
+code(r"""
+mem_algos = [a for a in ("ppo", "ppo_stack", "rppo") if a in RUNS]
+print(f"{'':24s}" + "".join(f"{ALGO_LABEL[a]:>20s}" for a in mem_algos))
+overall = {a: [] for a in mem_algos}
+for scen in scen_names:
+    line = f"{scen:24s}"
+    for a in mem_algos:
+        v = PR[a][scen]; overall[a].extend(v); line += f"{np.mean(v):11.1f} ± {np.std(v):4.1f}   "
+    print(line)
+print(f"{'mean over scenarios':24s}" + "".join(f"{np.mean(overall[a]):11.1f}         " for a in mem_algos))
+
+# paired difference vs plain PPO, per scenario, matched by training seed
+fig, ax = plt.subplots(figsize=(9, 4))
+w = 0.36
+for k, a in enumerate([x for x in mem_algos if x != "ppo"]):
+    d = []
+    for scen in scen_names:
+        n = min(len(PR["ppo"][scen]), len(PR[a][scen]))
+        d.append(np.array(PR[a][scen][:n]) - np.array(PR["ppo"][scen][:n]))
+    means = [x.mean() for x in d]; ses = [x.std() / np.sqrt(len(x)) if len(x) > 1 else 0.0 for x in d]
+    ax.bar(np.arange(len(scen_names)) + (k - 0.5) * w, means, width=w * 0.9, yerr=ses, color=COLOR[ALGO_LABEL[a]], error_kw=dict(lw=0.8, ecolor=MUTED), label=ALGO_LABEL[a])
+ax.axhline(0, color="#c3c2b7", lw=0.8)
+ax.set_xticks(range(len(scen_names))); ax.set_xticklabels([s.replace("_", "\n") for s in scen_names], fontsize=8.5)
+ax.grid(axis="x", visible=False); ax.legend()
+tidy(ax, "Reward difference to memoryless PPO (paired by training seed, mean ± s.e.)", None, "Δ reward")
+plt.tight_layout(); plt.show()
+""")
+
+md(r"""
+### Export check for the stacked policy
+
+A stacked policy is still a plain MLP with 68 inputs; the bundle carries `n_stack` and the
+numpy runtime is wrapped in the same `StackedPolicy`, so the export check is identical.
+""")
+
+code(r"""
+if "ppo_stack" in RUNS:
+    from edgeengine_aware.rl import StackedPolicy
+    best = PPO.load(SEEDS_DIR / "ppo_stack_seed0" / "best_model.zip", device="cpu")
+    w_stack = export_sb3_mlp(best); w_stack["n_stack"] = 4
+    bundle_stack = export_policy(SB3Policy(best), profile, policy_type="mlp_ppo_framestack4", model=w_stack, notes="PPO with 4-frame stacking (seed 0)")
+    bundle_stack.save(OUT / "ppo_stack_seed0_bundle.json")
+    ref_pol, np_pol = StackedPolicy(SB3Policy(best), 4), StackedPolicy(NumpyMLPPolicy(w_stack), 4)
+    env = make_env("default"); agree = total = 0
+    for s in list(EVAL_SEEDS)[:3]:
+        obs, _ = env.reset(seed=s); ref_pol.reset(); np_pol.reset(); done = False
+        while not done:
+            a_ref, a_np = ref_pol.act(obs), np_pol.act(obs)
+            agree += int(np.array_equal(a_ref, a_np)); total += 1
+            obs, _, term, trunc, _ = env.step(a_ref); done = term or trunc
+    print(f"stacked policy: input dim {w_stack['input_dim']}, numpy runtime agrees on {agree}/{total} observations")
+""")
+
+md(r"""
+## 10. Reading the results
+
+### What this run found (default budget, executed 2026-09-19)
+
+| question | answer from the tables above |
+|---|---|
+| Does PPO beat the rule-based controller on the nominal scenario? | **No** — about 4 reward units below it (79 vs 83, five seeds, std ≈ 1). On a sunny week the reward is flat between sensible duty cycles and the revised rule-based controller already sits at the optimum. |
+| Does PPO win where adaptivity matters? | **Marginally** — +4 on `cloudy_week`, at parity or slightly below elsewhere; the fixed 3-hourly duty cycle remains the best single policy on the cloudy week. |
+| Is the single-run picture reliable? | **Yes for PPO** (std across five seeds ≈ 1–3 units), **no for DQN** (std 4–10) and not yet for Recurrent PPO (two seeds, under-trained at 500 k steps). |
+| Does memory help? | **No** — frame stacking is 2–9 units worse than plain PPO on every scenario, the LSTM policy worse still at this budget. The engineered summary statistics in the observation (EWMA of harvest and ACKs, explicit ages) already carry what the policy needs. |
+| Is the export contract sound? | **Yes** — the numpy runtime reproduces every SB3 action for both the plain and the stacked policy. |
+
+The honest summary is that, with the present reward and action space, **a well-designed
+interpretable controller is as good as a learned one**. That is not a failure of the
+simulator — it is the benchmark telling us where the decision problem is too easy: the
+agent's only levers are *when* to sample and *whether* to transmit, and on a slowly varying
+field a duty cycle with a battery guard is close to optimal. The value of RL will appear when
+the action space contains decisions a rule cannot tune by hand — transmit power and spreading
+factor, payload size, local event detection — and when the environment is less benign
+(rain fronts, correlated failures, multiple sensors). Those are the next steps for the
+simulator, and this notebook is the regression protocol to measure them with.
+
+### How to read a new run
+
+1. **Nominal scenario.** Parity with the rule-based controller is expected; a large deficit
+   means under-training or a broken reward.
+2. **Energy-limited scenarios** (`cloudy_week`, `tiny_battery`) test energy awareness,
+   `drought` and `demanding_application` test application awareness, `lossy_link` tests
+   retransmission behaviour. A robust policy never falls below the rule-based one and beats
+   the fixed duty cycles where they collapse.
+3. **Components.** A win obtained by cutting staleness while keeping the battery penalty at
+   zero is the intended behaviour; a win obtained by draining the battery is not.
+4. **DQN vs PPO.** A gap of ~15 units and a much larger seed variance say that the
+   factored action heads and on-policy exploration matter here; if a six-output Q-network
+   is the embedded target, it needs more steps or a better schedule.
+5. **Seeds.** Quote mean ± std across training runs; when the std is comparable to the
+   margin, the comparison is noise.
+6. **Memory.** A gain that survives the seed variance means the hidden state matters and a
+   ring buffer belongs in the firmware; no gain means the observation already suffices.
+
+Next steps: an action for LoRa spreading factor / transmit power (the "how to transmit"
+dimension), harder scenarios in the mixture, trace-driven backends with real irradiance and
+soil data, and re-running this notebook after every change to the reward or the models.
 """)
 
 nb["cells"] = cells

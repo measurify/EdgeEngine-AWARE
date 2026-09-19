@@ -23,11 +23,18 @@ _IDX = {f.name: i for i, f in enumerate(OBSERVATION_FIELDS)}
 class RuleBasedParams:
     """Thresholds of the interpretable baseline (observation units unless noted)."""
 
-    soc_critical: float = 0.15
-    """Below this SoC: sleep, unless the application is urgent and starving."""
+    soc_critical: float = 0.20
+    """Below this SoC: deep economy - one report every ``deep_eco_interval_h``,
+    nothing else, unless the application is urgent and starving."""
 
-    soc_low: float = 0.35
-    """Below this SoC: economy mode (sparser reports, low-cost sensing, no checks)."""
+    soc_low: float = 0.50
+    """Below this SoC: economy mode (report interval stretched, no checks).
+    Half of the storage is the trigger because a 300 J buffer covers only a
+    few cloudy days: waiting for the battery to be nearly empty is too late."""
+
+    deep_eco_interval_h: float = 8.0
+    """Report interval below ``soc_critical`` (still high-quality samples: a
+    cheap noisy sample is worth little to the application)."""
 
     soc_high: float = 0.70
     """Above this SoC (or under strong harvesting): generous mode."""
@@ -39,7 +46,10 @@ class RuleBasedParams:
     """Scheduled report interval per priority (routine / elevated / urgent)."""
 
     report_interval_eco_factor: float = 2.0
-    """Economy mode stretches the routine report interval by this factor."""
+    """Economy mode stretches the report interval by this factor."""
+
+    eco_sensing_level: int = 2
+    """Sensing level used for reports in economy mode (2 = keep high quality)."""
 
     report_interval_generous_factor: float = 0.75
     """Generous mode shrinks the routine report interval by this factor."""
@@ -77,15 +87,18 @@ class RuleBasedPolicy:
     the node confirms it with a high-quality sample and reports immediately.
 
     Rules, in order:
-      1. **Survival** - SoC below ``soc_critical``: do nothing, unless the
-         priority is urgent and the application has not heard from the node
-         for longer than the urgent report interval (then a low-cost report).
+      1. **Deep economy** - SoC below ``soc_critical``: one high-quality report
+         every ``deep_eco_interval_h`` (urgent priority: every urgent interval),
+         nothing else.
       2. **Retry** - a fresh high-quality sample that was not acknowledged is
          retransmitted (no new sensing).
       3. **Scheduled report** - when the estimated information age at the
          application exceeds the report interval (shorter under higher
          priority, stretched in economy mode, shrunk in generous mode):
-         high-quality sample + transmit (low-cost sample in economy mode).
+         high-quality sample + transmit. Economy mode (SoC below ``soc_low``)
+         keeps the sample quality and saves energy by reporting less often and
+         by skipping the checks - a cheap noisy sample is worth little to the
+         application, a missed hour is cheap.
       4. **Event report** - the stored check differs from the reported value
          by more than ``event_delta``, or the stored value is important
          (near/below a threshold) and differs by more than ``importance_delta``:
@@ -119,23 +132,23 @@ class RuleBasedPolicy:
         has_reported = float(o[_IDX["time_since_tx_success"]]) < 1.0
         priority = int(round(float(o[_IDX["app_priority"]]) * 2))  # 0 / 1 / 2
         importance = float(o[_IDX["importance"]])
-        urgent, elevated = priority >= 2, priority >= 1
-        eco = soc < p.soc_low and not elevated
+        urgent = priority >= 2
+        eco = soc < p.soc_low and not urgent
         generous = (soc > p.soc_high or harvest_recent > p.harvest_strong) and not eco
         unreported = has_measurement and (since_ack_h > meas_age_h + 1e-6)
         delta = abs(meas - reported) if (has_measurement and has_reported) else (1.0 if has_measurement else 0.0)
 
         interval_h = p.report_interval_h[priority]
-        if priority == 0:
-            if eco:
-                interval_h *= p.report_interval_eco_factor
-            elif generous:
-                interval_h *= p.report_interval_generous_factor
+        if eco:
+            interval_h *= p.report_interval_eco_factor
+        elif generous and priority == 0:
+            interval_h *= p.report_interval_generous_factor
 
-        # 1. survival
+        # 1. deep economy
         if soc < p.soc_critical:
-            if urgent and app_age_h > p.report_interval_h[2]:
-                return encode_action(SENSE_LOW, TX_YES)
+            limit_h = p.report_interval_h[2] if urgent else p.deep_eco_interval_h
+            if app_age_h >= limit_h:
+                return encode_action(SENSE_HIGH, TX_YES)
             return encode_action(SENSE_NONE, TX_NO)
         # 2. retry a fresh, unacknowledged *report* (high-quality sample); cheap
         #    low-cost checks are never retried, they are confirmed by rule 4
@@ -143,7 +156,7 @@ class RuleBasedPolicy:
             return encode_action(SENSE_NONE, TX_YES)
         # 3. scheduled report
         if app_age_h >= interval_h:
-            return encode_action(SENSE_LOW if eco else SENSE_HIGH, TX_YES)
+            return encode_action(p.eco_sensing_level if eco else SENSE_HIGH, TX_YES)
         # 4. event / importance report
         if unreported and (delta > p.event_delta or (importance > p.importance_immediate and delta > p.importance_delta)):
             return encode_action(SENSE_HIGH, TX_YES)
