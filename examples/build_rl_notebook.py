@@ -29,11 +29,13 @@ What it does:
 
 1. defines the **evaluation protocol** — six named scenarios, held-out seeds, one metric table;
 2. measures the **baselines** (rule-based, periodic duty cycles, random) on every scenario;
-3. trains **PPO** (on the native `MultiDiscrete([3, 2])` action space) and **DQN** (on the
-   flat 6-action encoding) on a *mixture* of the six scenarios with domain randomisation;
+3. trains **PPO** (on the native `MultiDiscrete([3, 4])` action space: sensing level × radio
+   mode) and **DQN** (on the flat 12-action encoding) on a *mixture* of the six scenarios
+   with domain randomisation;
 4. plots **learning curves** against the baselines;
 5. runs the **full comparison** on all scenarios and shows where the learned policies win or lose;
-6. looks at **what the agent learned** (actions vs. battery, priority, time of day);
+6. looks at **what the agent learned** (actions vs. battery, priority, and radio mode vs. the
+   link estimate);
 7. **exports** the PPO actor as a `PolicyBundle` and checks that a numpy-only forward pass —
    the same arithmetic a microcontroller would run — reproduces the SB3 actions exactly;
 8. repeats training over **several seeds** (via `examples/train_seeds.py`) and reports
@@ -81,6 +83,8 @@ from edgeengine_aware.scenarios import SCENARIOS, get_scenario
 from edgeengine_aware.rl import make_env, make_env_fn, SB3Policy, evaluate, summarize, export_sb3_mlp, NumpyMLPPolicy
 from edgeengine_aware.deployment import export_policy
 from edgeengine_aware.observation import NodeProfile
+PROFILE = NodeProfile.from_config(get_scenario("default"))   # flash constants (energies, thresholds, link-budget table)
+MODE_NAMES = tuple(m.name for m in get_scenario("default").communication.modes)
 
 torch.set_num_threads(max(1, os.cpu_count() // 2))
 print("EdgeEngine AWARE", ea.__version__, "| torch", torch.__version__, "| threads", torch.get_num_threads())
@@ -151,10 +155,10 @@ application would log.
 """)
 
 code(r"""
-print(f"{'scenario':24s} {'harvest':>9s} {'battery':>8s} {'p(deliv)':>9s} {'ET/day':>7s} {'requests/day':>13s}")
+print(f"{'scenario':24s} {'harvest':>9s} {'battery':>8s} {'margin std/robust':>18s} {'ET/day':>7s} {'requests/day':>13s}")
 for name in SCENARIOS:
     c = get_scenario(name)
-    print(f"{name:24s} {c.harvesting.max_power_w*1e3*c.harvesting.efficiency*c.harvesting.clearness_mean:7.2f} mW {c.storage.capacity_j:6.0f} J {c.communication.base_success_prob:9.2f} {c.agriculture.et_rate_per_day:7.2f} {c.application.request_rate_per_day:13.1f}")
+    print(f"{name:24s} {c.harvesting.max_power_w*1e3*c.harvesting.efficiency*c.harvesting.clearness_mean:7.2f} mW {c.storage.capacity_j:6.0f} J {c.communication.mean_margin_db(1):+8.0f} / {c.communication.mean_margin_db(2):+3.0f} dB {c.agriculture.et_rate_per_day:7.2f} {c.application.request_rate_per_day:13.1f}")
 """)
 
 md(r"""
@@ -165,9 +169,9 @@ Policies are passed as factories so that stateful ones start clean at each episo
 
 code(r"""
 BASELINES = {
-    "rule-based":  RuleBasedPolicy,
-    "periodic 1h": lambda: PeriodicPolicy(period_steps=4, sensing_level=2),
-    "periodic 3h": lambda: PeriodicPolicy(period_steps=12, sensing_level=2),
+    "rule-based":  lambda: RuleBasedPolicy(profile=PROFILE),                       # adaptive radio mode
+    "periodic 1h": lambda: PeriodicPolicy(period_steps=4, sensing_level=2, tx=2),   # standard mode
+    "periodic 3h": lambda: PeriodicPolicy(period_steps=12, sensing_level=2, tx=3),  # robust mode
     "random":      lambda: RandomPolicy(seed=0),
 }
 t0 = time.time()
@@ -186,14 +190,14 @@ print(); print_table(baseline_rows, "min_soc", "{:7.2f}")
 """)
 
 md(r"""
-The hourly duty cycle is a strong baseline on the nominal scenario and collapses where the
-energy budget shrinks (`cloudy_week`, `tiny_battery`): it has no notion of battery. The
-3-hourly one happens to match the cloudy budget and is hard to beat *there*, but it wastes
-the sunny weeks and is blind to the application (`lossy_link`, `drought`). The rule-based
-controller never collapses and, since its economy mode was revised (report less often but
-keep the sample quality, enter economy at 50 % SoC), it is the strongest baseline on most
-rows. That is the bar a learned policy has to clear on *every* row at once — a deliberately
-high one: beating a weak baseline proves nothing.
+The hourly duty cycle in the standard radio mode is a strong baseline on the nominal
+scenario and collapses where the energy budget shrinks (`cloudy_week`, `tiny_battery`) or the
+link degrades (`lossy_link`): it has no notion of battery or link. The 3-hourly one in the
+robust mode is safe almost everywhere but wastes energy on every uplink and information on
+every sunny week. The rule-based controller chooses the report interval from the battery and
+the radio mode from its path-loss estimate; it never collapses and is the strongest baseline
+on most rows. That is the bar a learned policy has to clear on *every* row at once — a
+deliberately high one: beating a weak baseline proves nothing.
 """)
 
 md(r"""
@@ -231,8 +235,9 @@ def load_eval_curve(log_dir):
 md(r"""
 ### 3a. PPO on the native `MultiDiscrete` action space
 
-Two independent categorical heads (3 sensing levels × 2 transmit choices). A small
-`64×64 tanh` network is plenty for 17 inputs and keeps the export trivially embeddable.
+Two independent categorical heads (3 sensing levels × 4 transmit choices: off / fast /
+standard / robust). A small `64×64 tanh` network is plenty for 18 inputs and keeps the export
+trivially embeddable.
 `gamma = 0.99` gives an effective horizon of ~100 steps = 25 h, which covers a full
 day/night cycle of harvesting.
 """)
@@ -253,11 +258,11 @@ ppo = PPO.load(ppo_log / "best_model.zip", device="cpu")      # the best greedy 
 """)
 
 md(r"""
-### 3b. DQN on the flat 6-action encoding
+### 3b. DQN on the flat 12-action encoding
 
-`FlatActionWrapper` maps `Discrete(6)` back to `(sensing_level, transmit)` with
-`flat = sensing_level * 2 + transmit`. DQN is included because a Q-table or a Q-network with
-six outputs is the most natural thing to put on a microcontroller.
+`FlatActionWrapper` maps `Discrete(12)` back to `(sensing_level, transmit)` with
+`flat = sensing_level * 4 + transmit`. DQN is included because a Q-table or a Q-network with
+twelve outputs is the most natural thing to put on a microcontroller.
 """)
 
 code(r"""
@@ -286,7 +291,7 @@ evaluation episodes — the mixture is wide, so the band is wide too.
 """)
 
 code(r"""
-ref_rows = evaluate({"rule-based": RuleBasedPolicy, "periodic 1h": lambda: PeriodicPolicy(4, 2), "periodic 3h": lambda: PeriodicPolicy(12, 2)},
+ref_rows = evaluate({"rule-based": BASELINES["rule-based"], "periodic 1h": BASELINES["periodic 1h"], "periodic 3h": BASELINES["periodic 3h"]},
                     ["mixed"], seeds=range(10_000, 10_000 + 4 * B["eval_episodes"]), randomize=True)
 ref = summarize(ref_rows)["mixed"]
 
@@ -457,7 +462,7 @@ def action_profile(policy_factory, scenario, seeds):
             obs, _, term, trunc, info = env.step(a); done = term or trunc
     return np.array(soc), np.array(prio), np.array(hq), np.array(tx)
 
-profiles = {p: action_profile(f, "cloudy_week", list(EVAL_SEEDS)[:8]) for p, f in {**LEARNED, "rule-based": RuleBasedPolicy}.items()}
+profiles = {p: action_profile(f, "cloudy_week", list(EVAL_SEEDS)[:8]) for p, f in {**LEARNED, "rule-based": BASELINES["rule-based"]}.items()}
 soc_bins = np.array([0, 0.15, 0.3, 0.45, 0.6, 0.8, 1.0])
 fig, axes = plt.subplots(2, 2, figsize=(12, 7), sharey="row")
 for row, (what, idx) in enumerate([("high-quality sensing", 2), ("transmission", 3)]):
@@ -490,9 +495,60 @@ too flat to teach adaptivity and the scenarios or the weights need revisiting.
 """)
 
 md(r"""
+### Radio mode against the link estimate
+
+The third lever. For each policy, the share of uplinks sent in each radio mode as a function
+of the node's path-loss estimate (observation `path_loss_est`, binned), pooled over the
+`lossy_link` evaluation episodes. A link-aware policy should use the cheap **fast** mode when
+the estimated path loss is low, the **standard** mode in the middle and the expensive
+**robust** mode only when the link is bad; the rule-based controller does this with a fixed
+4 dB margin target — the learned policy is free to trade delivery risk against energy.
+""")
+
+code(r"""
+def mode_profile(policy_factory, scenario, seeds):
+    env = make_env(scenario)
+    i_pl = env.unwrapped.obs_builder.index("path_loss_est")
+    o = env.unwrapped.cfg.observation
+    pl, mode = [], []
+    for s in seeds:
+        obs, _ = env.reset(seed=s); pol = policy_factory(); pol.reset(); done = False
+        while not done:
+            a = pol.act(obs)
+            if a[1] > 0:
+                pl.append(o.path_loss_min_db + obs[i_pl] * (o.path_loss_max_db - o.path_loss_min_db)); mode.append(int(a[1]) - 1)
+            obs, _, term, trunc, _ = env.step(a); done = term or trunc
+    return np.array(pl), np.array(mode)
+
+MODE_COLORS = ["#eda100", "#2a78d6", "#4a3aa7"]   # fast / standard / robust
+pl_bins = np.array([125, 133, 137, 141, 145, 149, 155, 171])
+pols_for_modes = {**LEARNED, "rule-based": BASELINES["rule-based"]}
+fig, axes = plt.subplots(1, len(pols_for_modes), figsize=(4.3 * len(pols_for_modes), 3.8), sharey=True, squeeze=False)
+for ax, (name, f) in zip(axes[0], pols_for_modes.items()):
+    pl, mode = mode_profile(f, "lossy_link", list(EVAL_SEEDS)[:6])
+    centers, shares, counts = [], [], []
+    for lo, hi in zip(pl_bins[:-1], pl_bins[1:]):
+        m = (pl >= lo) & (pl < hi)
+        if m.sum() >= 15:
+            centers.append((lo + hi) / 2); shares.append([np.mean(mode[m] == k) for k in range(3)]); counts.append(int(m.sum()))
+    shares = np.array(shares).T if shares else np.zeros((3, 0))
+    bottom = np.zeros(len(centers))
+    for k in range(3):
+        ax.bar(centers, shares[k], bottom=bottom, width=3.2, color=MODE_COLORS[k], label=MODE_NAMES[k]); bottom += shares[k]
+    for c, n in zip(centers, counts):
+        ax.annotate(f"n={n}", (c, 1.02), ha="center", fontsize=7, color=MUTED)
+    ax.set_ylim(0, 1.1); ax.set_xlim(pl_bins[0] - 2, 160)
+    ax.grid(axis="x", visible=False)
+    tidy(ax, name, "path-loss estimate [dB]", "share of uplinks" if ax is axes[0][0] else None)
+axes[0][0].legend(loc="lower left", fontsize=8)
+fig.suptitle("Radio mode chosen vs. the node's link estimate (lossy_link)", x=0.01, ha="left", fontweight="bold")
+plt.tight_layout(); plt.show()
+""")
+
+md(r"""
 ## 7. Export: from SB3 to a deployable bundle
 
-The PPO actor is a `17 → 64 → 64 → 5` MLP (`tanh`, two categorical heads of 3 and 2 logits).
+The PPO actor is an `18 → 64 → 64 → 7` MLP (`tanh`, two categorical heads of 3 and 4 logits).
 `export_sb3_mlp` extracts its weights as plain lists; `export_policy` wraps them with the
 observation order, the normalisation constants and the action encoding. `NumpyMLPPolicy` then
 runs the bundle with numpy only — the same arithmetic a C port would do — and we check that it
@@ -500,7 +556,7 @@ reproduces the SB3 actions **on every observation** of several episodes.
 """)
 
 code(r"""
-profile = NodeProfile.from_config(get_scenario("default"))
+profile = PROFILE
 weights = export_sb3_mlp(ppo)
 bundle = export_policy(SB3Policy(ppo), profile, policy_type="mlp_ppo", model=weights, notes=f"PPO {B['ppo_steps']:,} steps, domain randomisation on")
 path = bundle.save(OUT / f"ppo_{BUDGET}_bundle.json")
@@ -664,7 +720,7 @@ The observation is not a Markov state (see `docs/observation.md`): the weather r
 channel state and the application's internal requests are hidden. Two standard remedies are
 compared with the memoryless PPO, on the same mixture and the same seeds:
 
-* **PPO + frame stacking (4)** — the last four observations concatenated (68 inputs). On a
+* **PPO + frame stacking (4)** — the last four observations concatenated (72 inputs). On a
   microcontroller this is a ring buffer of four vectors; `rl.FrameStacker` reproduces SB3's
   `VecFrameStack` exactly and `rl.StackedPolicy` wraps any policy with it.
 * **Recurrent PPO** (`sb3-contrib`, LSTM with 32 units) — memory learned end to end. Costlier
@@ -707,7 +763,7 @@ plt.tight_layout(); plt.show()
 md(r"""
 ### Export check for the stacked policy
 
-A stacked policy is still a plain MLP with 68 inputs; the bundle carries `n_stack` and the
+A stacked policy is still a plain MLP with 72 inputs; the bundle carries `n_stack` and the
 numpy runtime is wrapped in the same `StackedPolicy`, so the export check is identical.
 """)
 
@@ -732,25 +788,33 @@ if "ppo_stack" in RUNS:
 md(r"""
 ## 10. Reading the results
 
-### What this run found (default budget, executed 2026-09-19)
+### What this run found (default budget, three-mode radio, executed 2026-09-19)
 
 | question | answer from the tables above |
 |---|---|
-| Does PPO beat the rule-based controller on the nominal scenario? | **No** — about 4 reward units below it (79 vs 83, five seeds, std ≈ 1). On a sunny week the reward is flat between sensible duty cycles and the revised rule-based controller already sits at the optimum. |
-| Does PPO win where adaptivity matters? | **Marginally** — +4 on `cloudy_week`, at parity or slightly below elsewhere; the fixed 3-hourly duty cycle remains the best single policy on the cloudy week. |
-| Is the single-run picture reliable? | **Yes for PPO** (std across five seeds ≈ 1–3 units), **no for DQN** (std 4–10) and not yet for Recurrent PPO (two seeds, under-trained at 500 k steps). |
-| Does memory help? | **No** — frame stacking is 2–9 units worse than plain PPO on every scenario, the LSTM policy worse still at this budget. The engineered summary statistics in the observation (EWMA of harvest and ACKs, explicit ages) already carry what the policy needs. |
-| Is the export contract sound? | **Yes** — the numpy runtime reproduces every SB3 action for both the plain and the stacked policy. |
+| Does PPO beat the rule-based controller on the nominal scenario? | **No** — 74 ± 3 (five seeds) vs 80: the link-aware rule-based controller (economy mode + cheapest radio mode with ≥ 4 dB expected margin) is the best policy on the sunny week. |
+| Does PPO win where adaptivity matters? | **On energy**: +4 on `cloudy_week` (66 ± 8 vs 62; the 2 M-step run: 70 vs 62) with a higher minimum SoC. **Not on the link**: −5 on `lossy_link` — PPO uses the robust mode more readily than the rule's link-budget table requires. Parity on `drought`. |
+| Is the single-run picture reliable? | PPO's spread across seeds grew with the larger action space (std ≈ 3 on most scenarios, 8 on `cloudy_week`); DQN is not reliable (std 7–13) and RecurrentPPO is under-trained at 500 k steps. |
+| Does the learned policy use the radio modes sensibly? | **PPO yes**: standard mode when the estimated path loss is low, robust when it is high, the fast mode almost never. **DQN no**: 60–80 % of its uplinks go out in the fast mode regardless of the link and most are lost. The rule is the most conservative (robust above ~140 dB). |
+| Does memory help? | **No** — frame stacking is 1–9 units below plain PPO everywhere (with a smaller seed variance), the LSTM policy worse still. |
+| Is the export contract sound? | **Yes** — the numpy runtime reproduces every SB3 action for the plain (18 inputs) and the stacked (72 inputs) policy. |
 
-The honest summary is that, with the present reward and action space, **a well-designed
-interpretable controller is as good as a learned one**. That is not a failure of the
-simulator — it is the benchmark telling us where the decision problem is too easy: the
-agent's only levers are *when* to sample and *whether* to transmit, and on a slowly varying
-field a duty cycle with a battery guard is close to optimal. The value of RL will appear when
-the action space contains decisions a rule cannot tune by hand — transmit power and spreading
-factor, payload size, local event detection — and when the environment is less benign
-(rain fronts, correlated failures, multiple sensors). Those are the next steps for the
-simulator, and this notebook is the regression protocol to measure them with.
+The picture is consistent with the first round: a controller that encodes the physics it is
+given (an energy budget, a link-budget table) is very hard to beat with 1–2 M environment
+steps, and the learned policy earns its keep where the hand-written rules are crudest —
+the energy-limited week. Two levers are left on the table for the learned side: longer
+training (the mode dimension made the problem harder and the curves are still rising), and a
+reward that prices *lost* uplinks explicitly rather than only through energy and staleness.
+On the rule side, the natural next step is to make the margin target depend on the battery
+(accept more link risk when energy is plentiful) — which is precisely the coupling the
+learned policy is exploiting on the cloudy week.
+
+**History.** With the first version of the action space (sensing level × binary transmit,
+single 0.6 J radio mode) five-seed PPO matched the interpretable controller within a few
+reward units (−4 on the nominal week, +4 on the cloudy one) and memory did not help either.
+The radio-mode dimension (fast / standard / robust over a fading link the node observes only
+through its acknowledgements) was added to give the learned policy a decision a hand-written
+rule cannot tune well; the run above measures what that bought.
 
 ### How to read a new run
 

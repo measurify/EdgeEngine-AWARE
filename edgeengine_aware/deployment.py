@@ -35,8 +35,8 @@ from typing import Any, Callable, Sequence
 import numpy as np
 
 from . import __version__
-from .actions import ACTION_NVEC, N_FLAT_ACTIONS, SENSE_NONE, plan_execution
-from .interfaces import Clock, EnergySource, EnergyStorage, Measurement, Packet, Policy, Radio, RemoteApplication, Sensor
+from .actions import DEFAULT_N_MODES, SENSE_NONE, action_nvec, n_flat_actions, plan_execution
+from .interfaces import Clock, EnergySource, EnergyStorage, Measurement, Packet, Policy, Radio, RemoteApplication, Sensor, TxResult
 from .observation import OBSERVATION_FIELDS, NodeProfile, NodeStateTracker, ObservationBuilder
 
 
@@ -64,6 +64,8 @@ class CycleReport:
     requested_action: tuple[int, int]
     executed_sensing_level: int
     executed_transmit: bool
+    tx_mode: int
+    """Radio mode used (-1 when no transmission)."""
     tx_success: bool | None
     rejected: tuple[str, ...]
     measurement: Measurement | None
@@ -135,10 +137,10 @@ class NodeController:
         tx_success: bool | None = None
         if plan.transmit and self.tracker.measurement is not None:
             packet = Packet(measurement=self.tracker.measurement, sent_at_s=now)
-            acked = hw.radio.transmit(packet)
-            tx_success = acked if p.ack_available else None
-            self.tracker.on_transmission(packet, tx_success, now)
-            if self.priority_update_mode == "on_uplink" and acked:
+            result = hw.radio.transmit(packet, plan.mode)
+            tx_success = result.acked if p.ack_available else None
+            self.tracker.on_transmission(packet, tx_success, now, mode=plan.mode, margin_db=result.margin_db)
+            if self.priority_update_mode == "on_uplink" and result.acked:
                 self.tracker.set_priority(hw.application.priority())  # downlink piggybacked on the ACK
         a = np.asarray(action).reshape(-1)
         report = CycleReport(
@@ -147,6 +149,7 @@ class NodeController:
             requested_action=(int(a[0]), int(a[1])),
             executed_sensing_level=plan.sensing_level,
             executed_transmit=plan.transmit,
+            tx_mode=plan.mode,
             tx_success=tx_success,
             rejected=plan.rejected,
             measurement=measurement,
@@ -234,18 +237,26 @@ class MockSensorDriver:
 
 
 class MockRadio:
-    def __init__(self, tx_energy_j: float, ack_probability: float = 1.0, rng: np.random.Generator | None = None):
-        self._e = tx_energy_j
-        self._p = ack_probability
+    """Radio stub: fixed path loss, ACK probability from the link budget of
+    the requested mode, margin reported back like a LinkCheck answer."""
+
+    def __init__(self, profile: NodeProfile, path_loss_db: float = 139.0, rng: np.random.Generator | None = None):
+        self._profile = profile
+        self._pl = path_loss_db
         self._rng = rng or np.random.default_rng(1)
-        self.sent: list[Packet] = []
+        self.sent: list[tuple[Packet, int]] = []
 
-    def tx_energy_j(self) -> float:
-        return self._e
+    def n_modes(self) -> int:
+        return self._profile.n_modes
 
-    def transmit(self, packet: Packet) -> bool:
-        self.sent.append(packet)
-        return bool(self._rng.random() < self._p)
+    def tx_energy_j(self, mode: int) -> float:
+        return self._profile.tx_energy_j[mode]
+
+    def transmit(self, packet: Packet, mode: int) -> TxResult:
+        self.sent.append((packet, mode))
+        margin = self._profile.margin_for_mode(mode, self._pl) + self._rng.normal(0.0, 2.0)
+        ok = bool(self._rng.random() < 1.0 / (1.0 + np.exp(-margin / 1.5)))
+        return TxResult(acked=ok, margin_db=float(margin) if ok else None)
 
 
 class MockDownlink:
@@ -298,7 +309,7 @@ def make_mock_backend(profile: NodeProfile, *, capacity_j: float = 300.0, energy
         storage=MockFuelGauge(capacity_j, energy_j),
         source=MockHarvesterMonitor(harvest, clock),
         sensor=MockSensorDriver(soil_trace, profile.sensing_energy_j, profile.sensing_noise_std, rng),
-        radio=MockRadio(profile.tx_energy_j, ack_probability=0.9, rng=rng),
+        radio=MockRadio(profile, rng=rng),
         application=MockDownlink(0),
         profile=profile,
     )
@@ -359,14 +370,16 @@ def _json_default(o):
     raise TypeError(f"not JSON serialisable: {type(o)}")
 
 
-def action_encoding_spec() -> dict[str, Any]:
+def action_encoding_spec(n_modes: int = DEFAULT_N_MODES) -> dict[str, Any]:
+    transmit = {"0": "no transmission"}
+    transmit.update({str(k + 1): f"transmit latest stored measurement with radio mode {k}" for k in range(n_modes)})
     return {
         "type": "MultiDiscrete",
-        "nvec": list(ACTION_NVEC),
-        "n_flat": N_FLAT_ACTIONS,
-        "flat_index": "sensing_level * 2 + transmit",
+        "nvec": list(action_nvec(n_modes)),
+        "n_flat": n_flat_actions(n_modes),
+        "flat_index": f"sensing_level * {1 + n_modes} + transmit",
         "sensing_level": {"0": "no sensing", "1": "low-cost sensing", "2": "high-quality sensing"},
-        "transmit": {"0": "no transmission", "1": "transmit latest stored measurement"},
+        "transmit": transmit,
     }
 
 
@@ -385,7 +398,7 @@ def export_policy(policy: Any, profile: NodeProfile, *, policy_type: str, model:
         observation_names=[f.name for f in OBSERVATION_FIELDS],
         observation_normalisation=[f.normalisation for f in OBSERVATION_FIELDS],
         profile=dataclasses.asdict(profile),
-        action_encoding=action_encoding_spec(),
+        action_encoding=action_encoding_spec(profile.n_modes),
         model=model,
         metadata={
             "edgeengine_aware_version": __version__,

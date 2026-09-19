@@ -12,7 +12,7 @@ Scenario                what is stressed                            what a good 
 default                 nothing in particular (mixed weather)       report ~hourly, more near thresholds
 cloudy_week             harvesting ~40 % of default, dark days      slow down early, keep a reserve, use cheap checks
 tiny_battery            storage halved, small buffer                smooth consumption, avoid bursts at night
-lossy_link              delivery probability ~0.55, slow fading     retry when the link is good, avoid wasting uplinks
+lossy_link              +6 dB path loss, deep slow fading           choose the radio mode from the link estimate
 drought                 fast drying, no rain, slow irrigation       track the approach to the thresholds closely
 demanding_application   frequent elevated/urgent campaigns          follow the priority, save energy in between
 """
@@ -45,11 +45,13 @@ def tiny_battery() -> EdgeEngineAwareConfig:
 
 
 def lossy_link() -> EdgeEngineAwareConfig:
+    """Node far from the gateway: +6 dB path loss and slower fading. The
+    standard mode drops to a mean margin of -2 dB (p ~ 0.25), the robust mode
+    keeps +6 dB (p ~ 0.85) at twice the energy; the fast mode only works in
+    the favourable fading phases."""
     cfg = default_config()
-    cfg.communication.base_success_prob = 0.55
-    cfg.communication.min_success_prob = 0.15
-    cfg.communication.channel_noise_std = 0.2
-    cfg.communication.channel_autocorr = 0.95
+    cfg.communication.path_loss_mean_db += 6.0
+    cfg.communication.slow_fading_autocorr = 0.98
     return cfg
 
 

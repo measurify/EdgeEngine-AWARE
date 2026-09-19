@@ -7,7 +7,7 @@ way a simulator becomes useless for deployment.
 
 | layer | symbol | lives in | example |
 |---|---|---|---|
-| **true physical state** | `x_t` | `agriculture.FieldEnvironment`, `energy.SolarEnergySource`, `communication.SimulatedLoRaRadio` | soil moisture θ = 0.41, irradiance, channel quality |
+| **true physical state** | `x_t` | `agriculture.FieldEnvironment`, `energy.SolarEnergySource`, `communication.SimulatedLoRaRadio` | soil moisture θ = 0.41, irradiance, path loss 141 dB |
 | **node-local information** | `y_t` | `observation.NodeState` | last sample 0.43 ± 0.04 taken 45 min ago, 148 J stored, 2.1 mW harvested |
 | **application information** | `z_t` | `application.RemoteMonitoringApplication` | last delivered value 0.47, received 3 h ago |
 | **application utility** | `u_t` | `application.RemoteMonitoringApplication.tracking()` / `.receive()` | how right the application's picture is, weighted by criticality |
@@ -58,12 +58,21 @@ than 0.05 in one step or a zone crossing is an *environmental event*.
 The node stores the sample with its timestamp and a *quality tag* (nominal σ), never the
 realised error.
 
-**Communication** (`communication.SimulatedLoRaRadio`): one uplink costs `E_tx` whether or not
-it is delivered; delivery is Bernoulli with `p(t) = clip(p_base + q(t), p_min, 1)`, `q(t)` a slow
-AR(1) channel process. An ACK tells the node about delivery (`ack_available`; with
-unconfirmed uplinks the node assumes delivery and its information-age estimate becomes
-optimistic). No duty cycle,
-collisions or spreading factors yet — they belong in this class.
+**Communication** (`communication.SimulatedLoRaRadio`): the radio has `K` modes (default 3:
+fast / standard / robust, i.e. SF7 / SF9 / SF12-like at 14 dBm, costing 0.3 / 0.6 / 1.2 J per
+uplink). An uplink in mode `k` costs `E_k` whether or not it is delivered and is delivered with
+
+    margin_k(t) = P_tx,k − PL(t) − S_k          PL(t) = PL_0 + f_slow(t) + f_fast
+    p_k(t)      = 1 / (1 + exp(−margin_k(t) / 1.5 dB))
+
+where `S_k` is the gateway sensitivity of the mode, `f_slow` an AR(1) shadowing process
+(σ = 5 dB, correlation ≈ 8 h) and `f_fast` a per-attempt Gaussian (σ = 2 dB). With the defaults
+the mean margins are −2 / +4 / +12 dB. An ACK tells the node about delivery and carries the
+measured margin (`ack_available`; with unconfirmed uplinks the node assumes delivery and its
+information-age estimate becomes optimistic); the node converts the margin into a path-loss
+estimate valid for every mode, and raises that estimate to a mode's link budget whenever an
+uplink in that mode is lost. Duty cycle, collisions and gateway congestion are not modelled —
+they belong in this class.
 
 **Application** (`application.RemoteMonitoringApplication`): holds the last delivered value
 and its age (AoI). Derives the *priority* it sends to the node from what it knows: value
@@ -104,16 +113,16 @@ sustainable policy and hundreds for an always-on one.
 * **State** `s_t = (x_t, y_t, z_t)`: hidden world, node information, application information.
   The transition `s_{t+1} ~ P(·|s_t, a_t)` is Markov (all processes are AR(1) or memoryless
   given the stored variables).
-* **Observation** `o_t = ObservationBuilder(y_t) ∈ [0,1]^17` — a deterministic function of the
+* **Observation** `o_t = ObservationBuilder(y_t) ∈ [0,1]^18` — a deterministic function of the
   node-local part of the state.
-* **Action** `a_t ∈ {0,1,2} × {0,1}`.
+* **Action** `a_t ∈ {0,1,2} × {0,1,…,K}` (sensing level; no transmission or radio mode).
 * **Reward** `r_t = R(s_t, a_t, s_{t+1})` as above.
 * **Episode** `T = 672` steps (7 days × 96 steps), *truncated*, never terminated unless
   `terminate_on_depletion` is set. Long horizon, no absorbing state: an infinite-horizon
   discounted objective (γ ≈ 0.99) is the natural training objective.
 
-Because `o_t ≠ s_t`, the agent faces a **POMDP**: the truth, the weather regime, the channel
-state and the application's internal flags are hidden. `docs/observation.md` §"Markov
+Because `o_t ≠ s_t`, the agent faces a **POMDP**: the truth, the weather regime, the fading
+state of the channel and the application's internal flags are hidden. `docs/observation.md` §"Markov
 property" lists what is done about it (EWMA statistics, explicit timers, cyclic time) and the
 two standard extensions (frame stacking, recurrent policies). In practice the observation is a
 reasonable approximate state: the hidden processes are slow (hours) relative to Δt (15 min)
@@ -128,7 +137,8 @@ and their effect on the reward is mediated by quantities the node does measure.
 | stored energy | ✔ | ✔ | ✔ (fuel gauge) |
 | true / future irradiance | ✔ | ✘ | ✘ |
 | measured harvesting power (past interval) | ✔ | ✔ | ✔ (current monitor) |
-| delivery probability | ✔ | ✘ | ✘ |
+| delivery probability / fading state | ✔ | ✘ | ✘ |
+| path-loss estimate from the last ACK (+ loss floors) | ✔ | ✔ | ✔ (ACK SNR + flash table) |
 | ACK history (EWMA) | ✔ | ✔ | ✔ |
 | application AoI | ✔ | estimated (✔) | estimated from ACKs |
 | application priority | ✔ | ✔ | ✔ (downlink) |

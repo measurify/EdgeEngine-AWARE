@@ -55,6 +55,19 @@ class Packet:
         return self.sent_at_s - self.measurement.timestamp_s
 
 
+@dataclass(frozen=True)
+class TxResult:
+    """Outcome of one uplink attempt as seen by the node."""
+
+    acked: bool
+    """Whether an acknowledgement was received."""
+
+    margin_db: float | None = None
+    """Link margin of the *used mode* as measured from the ACK (SNR above the
+    demodulation floor), or None when there was no ACK. A LoRaWAN node gets
+    this from the downlink SNR/RSSI or from a LinkCheckAns."""
+
+
 # ---------------------------------------------------------------------------
 # Hardware-facing protocols
 # ---------------------------------------------------------------------------
@@ -110,18 +123,19 @@ class Sensor(Protocol):
 
 @runtime_checkable
 class Radio(Protocol):
-    """Low-power long-range uplink."""
+    """Low-power long-range uplink with selectable modes (spreading factor / power)."""
 
-    def transmit(self, packet: Packet) -> bool:
-        """Send a packet. Returns True if an acknowledgement was received
-        (delivery confirmed). Energy is consumed regardless of the outcome.
-        On a link without confirmations the return value is meaningless and
-        the controller ignores it (``NodeProfile.ack_available``)."""
+    def transmit(self, packet: Packet, mode: int) -> TxResult:
+        """Send a packet with ``modes[mode]``. Energy is consumed regardless of
+        the outcome. On a link without confirmations ``acked`` is meaningless
+        and the controller ignores it (``NodeProfile.ack_available``)."""
         ...
 
-    def tx_energy_j(self) -> float:
-        """Nominal energy of one transmission attempt [J]."""
+    def tx_energy_j(self, mode: int) -> float:
+        """Nominal energy of one transmission attempt in ``mode`` [J]."""
         ...
+
+    def n_modes(self) -> int: ...
 
 
 @runtime_checkable

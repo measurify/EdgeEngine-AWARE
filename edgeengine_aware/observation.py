@@ -46,7 +46,17 @@ class NodeProfile:
     sensing_noise_std: tuple[float, ...]
     """Nominal noise per sensing level (quality tags)."""
 
-    tx_energy_j: float
+    tx_energy_j: tuple[float, ...]
+    """Energy per radio mode [J] (index = mode)."""
+
+    tx_power_dbm: tuple[float, ...]
+    sensitivity_dbm: tuple[float, ...]
+    """Link-budget constants per radio mode, used to turn a measured ACK
+    margin into a mode-independent path-loss estimate."""
+
+    reference_mode: int
+    """Mode whose energy is reported in the observation."""
+
     warning_threshold: float
     critical_threshold: float
     timestep_s: float = 900.0
@@ -68,7 +78,10 @@ class NodeProfile:
         return cls(
             sensing_energy_j=tuple(cfg.sensing.energy_j),
             sensing_noise_std=tuple(cfg.sensing.noise_std),
-            tx_energy_j=cfg.communication.tx_energy_j,
+            tx_energy_j=tuple(m.energy_j for m in cfg.communication.modes),
+            tx_power_dbm=tuple(m.tx_power_dbm for m in cfg.communication.modes),
+            sensitivity_dbm=tuple(m.sensitivity_dbm for m in cfg.communication.modes),
+            reference_mode=cfg.communication.reference_mode,
             warning_threshold=cfg.agriculture.warning_threshold,
             critical_threshold=cfg.agriculture.critical_threshold,
             timestep_s=cfg.time.timestep_s,
@@ -82,6 +95,18 @@ class NodeProfile:
     def baseline_energy_j(self) -> float:
         """Baseline energy of one decision interval [J]."""
         return self.baseline_power_w * self.timestep_s
+
+    @property
+    def n_modes(self) -> int:
+        return len(self.tx_energy_j)
+
+    def path_loss_from_margin(self, mode: int, margin_db: float) -> float:
+        """Path loss implied by a margin measured with ``mode`` [dB]."""
+        return self.tx_power_dbm[mode] - self.sensitivity_dbm[mode] - margin_db
+
+    def margin_for_mode(self, mode: int, path_loss_db: float) -> float:
+        """Expected margin of ``mode`` for a given path-loss estimate [dB]."""
+        return self.tx_power_dbm[mode] - path_loss_db - self.sensitivity_dbm[mode]
 
 
 # ---------------------------------------------------------------------------
@@ -146,10 +171,18 @@ class NodeState:
     link_quality: float
     """EWMA of ACK outcomes in [0, 1] (1 = every recent uplink delivered)."""
 
+    has_link_estimate: bool
+    """Whether at least one ACK carried a usable margin measurement."""
+
+    path_loss_est_db: float
+    """Path loss implied by the margin of the last ACK, converted with the
+    profile's link-budget constants (mode independent)."""
+
     sensing_energy_low_j: float
     sensing_energy_high_j: float
     tx_energy_j: float
-    """Hardware energy profile (flash constants or on-line measurements)."""
+    """Hardware energy profile (flash constants or on-line measurements);
+    ``tx_energy_j`` is the energy of the reference radio mode."""
 
     def soc(self) -> float:
         return 0.0 if self.capacity_j <= 0 else self.stored_energy_j / self.capacity_j
@@ -189,6 +222,7 @@ class NodeStateTracker:
         self._last_ack_packet: Packet | None = None
         self._priority = PRIORITY_ROUTINE
         self._link_quality = 1.0
+        self._path_loss_est_db: float | None = None
 
     def begin_step(
         self,
@@ -220,13 +254,14 @@ class NodeStateTracker:
     def on_measurement(self, measurement: Measurement) -> None:
         self._measurement = measurement
 
-    def on_transmission(self, packet: Packet, acked: bool | None, now_s: float) -> None:
-        """Register an uplink attempt.
+    def on_transmission(self, packet: Packet, acked: bool | None, now_s: float, mode: int = 0, margin_db: float | None = None) -> None:
+        """Register an uplink attempt made with radio ``mode``.
 
         ``acked`` is the ACK outcome, or ``None`` when the link gives no
         confirmation (``profile.ack_available`` is False): the node then
         assumes delivery for its age bookkeeping and leaves the link-quality
-        indicator untouched.
+        indicator untouched. ``margin_db`` is the link margin measured from the
+        ACK (if any); it is converted into a mode-independent path-loss estimate.
         """
         if acked is None or not self.profile.ack_available:
             self._last_ack_time_s = now_s
@@ -237,6 +272,15 @@ class NodeStateTracker:
         if acked:
             self._last_ack_time_s = now_s
             self._last_ack_packet = packet
+            if margin_db is not None:
+                self._path_loss_est_db = self.profile.path_loss_from_margin(mode, margin_db)
+        else:
+            # A lost uplink in ``mode`` says the margin of that mode was about
+            # zero or negative, i.e. the path loss is at least the mode's link
+            # budget: raise the estimate accordingly (a firmware-friendly,
+            # conservative update that makes the node escalate after failures).
+            floor_db = self.profile.path_loss_from_margin(mode, 0.0)
+            self._path_loss_est_db = floor_db if self._path_loss_est_db is None else max(self._path_loss_est_db, floor_db)
 
     def set_priority(self, priority: int) -> None:
         """Explicit downlink handling (used when priority arrives with an ACK)."""
@@ -254,6 +298,10 @@ class NodeStateTracker:
     @property
     def priority(self) -> int:
         return self._priority
+
+    @property
+    def path_loss_est_db(self) -> float | None:
+        return self._path_loss_est_db
 
     def state(self) -> NodeState:
         p = self.profile
@@ -288,9 +336,11 @@ class NodeStateTracker:
             reported_value=rep_value,
             app_priority=self._priority,
             link_quality=self._link_quality,
+            has_link_estimate=self._path_loss_est_db is not None,
+            path_loss_est_db=self._path_loss_est_db if self._path_loss_est_db is not None else p.observation.path_loss_max_db,
             sensing_energy_low_j=p.sensing_energy_j[1],
             sensing_energy_high_j=p.sensing_energy_j[2],
-            tx_energy_j=p.tx_energy_j,
+            tx_energy_j=p.tx_energy_j[p.reference_mode],
         )
 
 
@@ -322,9 +372,10 @@ OBSERVATION_FIELDS: tuple[ObservationField, ...] = (
     ObservationField("app_priority", "Priority requested by the application", "priority / 2", "downlink message"),
     ObservationField("importance", "Node-side importance of the stored measurement (proximity to thresholds)", "exp(-dist/importance_scale), 1 below critical, 0 if none", "computed in firmware from flash thresholds"),
     ObservationField("link_quality", "EWMA of recent ACK outcomes", "already in [0, 1]", "radio ACK"),
+    ObservationField("path_loss_est", "Path-loss estimate from the margin of the last ACK (mode independent)", "(PL - path_loss_min_db) / (path_loss_max_db - path_loss_min_db), clipped; 1 if none", "radio ACK SNR/RSSI + flash link-budget table"),
     ObservationField("sense_low_cost", "Energy of a low-cost sensing operation", "E / E_max, clipped to 1", "hardware profile"),
     ObservationField("sense_high_cost", "Energy of a high-quality sensing operation", "E / E_max, clipped to 1", "hardware profile"),
-    ObservationField("tx_cost", "Energy of one transmission attempt", "E / E_max, clipped to 1", "hardware profile"),
+    ObservationField("tx_cost", "Energy of one transmission attempt in the reference radio mode", "E / E_max, clipped to 1", "hardware profile"),
 )
 
 
@@ -417,6 +468,7 @@ class ObservationBuilder:
                 s.app_priority / (N_PRIORITY_LEVELS - 1),
                 self.importance(s.measurement_value, s.has_measurement),
                 s.link_quality,
+                (s.path_loss_est_db - o.path_loss_min_db) / (o.path_loss_max_db - o.path_loss_min_db) if s.has_link_estimate else 1.0,
                 s.sensing_energy_low_j / cap,
                 s.sensing_energy_high_j / cap,
                 s.tx_energy_j / cap,

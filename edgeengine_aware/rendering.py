@@ -20,6 +20,11 @@ if TYPE_CHECKING:  # pragma: no cover
 
 PRIORITY_NAMES = ("routine", "elevated", "URGENT")
 SENSE_NAMES = ("-", "low", "HIGH")
+_MODE_COLORS = ("#eda100", "#2a78d6", "#4a3aa7", "#1baf7a", "#e87ba4", "#008300")
+
+
+def plt_mode_color(k: int, n_modes: int) -> str:
+    return _MODE_COLORS[k % len(_MODE_COLORS)]
 
 
 def text_dashboard(env: "EdgeEngineAwareEnv") -> str:
@@ -27,7 +32,11 @@ def text_dashboard(env: "EdgeEngineAwareEnv") -> str:
     gt = env.ground_truth()
     ns = env.node_state()
     last = env._last_step
-    tx = "-" if not last["tx_attempted"] else ("ok" if last["tx_success"] else "FAIL")
+    if not last["tx_attempted"]:
+        tx = "-"
+    else:
+        mode_name = env.cfg.communication.modes[last["tx_mode"]].name if last["tx_mode"] >= 0 else "?"
+        tx = f"{mode_name}:{'ok' if last['tx_success'] else 'FAIL'}"
     meas = f"{ns.measurement_value:.3f}" if ns.has_measurement else "  n/a"
     app = f"{gt['app_last_value']:.3f}" if gt["app_last_value"] is not None else "  n/a"
     day, hour = env.clock.day_index(), env.clock.hour_of_day()
@@ -36,7 +45,7 @@ def text_dashboard(env: "EdgeEngineAwareEnv") -> str:
         f"  battery SoC        : {ns.soc():6.1%}   ({ns.stored_energy_j:7.1f} J / {ns.capacity_j:.0f} J)",
         f"  harvest (meas/true): {ns.harvest_power_w*1e3:6.2f} / {gt['harvest_power_true_w']*1e3:6.2f} mW   recent {ns.harvest_power_recent_w*1e3:.2f} mW   last step {env._last_harvested_j:.2f} J",
         f"  soil moisture      : true {gt['soil_moisture']:.3f} | node {meas} (age {ns.measurement_age_s/3600:.1f} h) | app {app} (AoI {gt['app_aoi_s']/3600:.1f} h)",
-        f"  zone / priority    : {('normal','warning','CRITICAL')[gt['zone']]} / {PRIORITY_NAMES[gt['app_priority']]}",
+        f"  zone / priority    : {('normal','warning','CRITICAL')[gt['zone']]} / {PRIORITY_NAMES[gt['app_priority']]}   path loss {gt['path_loss_db']:.0f} dB (node est. {ns.path_loss_est_db:.0f} dB)",
         f"  action             : sense={SENSE_NAMES[last['sensing_level']]}  tx={tx}",
         f"  reward             : {last['reward']:+.3f}   (utility {last['utility']:.3f})",
     ]
@@ -119,12 +128,18 @@ class DashboardRenderer:
             suc = step_series(log.tx_success)
             ax.vlines(t[lvl == 1], 0, 0.8, color="tab:green", alpha=0.5, lw=0.8, label="sense low")
             ax.vlines(t[lvl == 2], 0, 1.0, color="darkgreen", alpha=0.8, lw=0.8, label="sense high")
-            ax.scatter(t[(att == 1) & (suc == 1)], np.full(int(((att == 1) & (suc == 1)).sum()), 1.3), marker="^", s=12, color="tab:purple", label="tx ok")
-            ax.scatter(t[(att == 1) & (suc == 0)], np.full(int(((att == 1) & (suc == 0)).sum()), 1.3), marker="x", s=14, color="tab:red", label="tx fail")
-            ax.legend(loc="upper right", fontsize=7, ncol=4)
-        ax.set_ylim(0, 1.6)
+            mode = step_series(log.tx_mode)
+            n_modes = max(1, len(cfg.communication.modes))
+            for k in range(n_modes):
+                sel = (att == 1) & (suc == 1) & (mode == k)
+                if sel.any():
+                    ax.scatter(t[sel], np.full(int(sel.sum()), 1.15 + 0.15 * k), marker="^", s=12, color=plt_mode_color(k, n_modes), label=f"tx ok ({cfg.communication.modes[k].name})")
+            fail = (att == 1) & (suc == 0)
+            ax.scatter(t[fail], np.full(int(fail.sum()), 1.15 + 0.15 * np.clip(mode[fail], 0, n_modes - 1)), marker="x", s=14, color="tab:red", label="tx fail")
+            ax.legend(loc="upper center", fontsize=6.5, ncol=3)
+        ax.set_ylim(0, 2.4)
         ax.set_yticks([])
-        ax.set_title("Sensing and transmission events")
+        ax.set_title("Sensing and transmission events (tx markers by radio mode)")
 
         # AoI
         ax = axes[2, 0]

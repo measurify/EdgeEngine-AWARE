@@ -35,7 +35,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from .actions import ACTION_NVEC, SENSE_NONE, decode_action, plan_execution
+from .actions import SENSE_NONE, action_nvec, decode_action, plan_execution
 from .agriculture import FieldEnvironment
 from .application import RemoteMonitoringApplication
 from .communication import SimulatedLoRaRadio
@@ -51,8 +51,9 @@ from .sensing import SimulatedSoilMoistureSensor
 class EdgeEngineAwareEnv(gym.Env):
     """Energy-harvesting Edge IoT node in a smart-agriculture field.
 
-    Observation: ``Box(0, 1, (17,), float32)`` - see ``ObservationBuilder``.
-    Action:      ``MultiDiscrete([3, 2])`` - (sensing level, transmit).
+    Observation: ``Box(0, 1, (18,), float32)`` - see ``ObservationBuilder``.
+    Action:      ``MultiDiscrete([3, 1 + n_modes])`` - (sensing level, transmit /
+                 radio mode); ``[3, 4]`` with the default three-mode radio.
     """
 
     metadata = {"render_modes": ["human", "rgb_array", "ansi"], "render_fps": 10}
@@ -70,7 +71,7 @@ class EdgeEngineAwareEnv(gym.Env):
         self.profile = NodeProfile.from_config(self.cfg)
         self.obs_builder = ObservationBuilder(self.profile)
         self.observation_space = spaces.Box(self.obs_builder.low, self.obs_builder.high, dtype=np.float32)
-        self.action_space = spaces.MultiDiscrete(np.array(ACTION_NVEC, dtype=np.int64))
+        self.action_space = spaces.MultiDiscrete(np.array(action_nvec(self.cfg.communication.n_modes), dtype=np.int64))
 
         self._build_subsystems(self.cfg)
         self._renderer = None
@@ -84,7 +85,7 @@ class EdgeEngineAwareEnv(gym.Env):
 
     @staticmethod
     def _empty_last_step() -> dict[str, Any]:
-        return {"sensing_level": SENSE_NONE, "tx_attempted": False, "tx_success": None, "reward": 0.0, "utility": 0.0}
+        return {"sensing_level": SENSE_NONE, "tx_attempted": False, "tx_mode": -1, "tx_success": None, "reward": 0.0, "utility": 0.0}
 
     # ------------------------------------------------------------------
     # construction helpers
@@ -159,7 +160,7 @@ class EdgeEngineAwareEnv(gym.Env):
         return obs, info
 
     def step(self, action):
-        act = decode_action(action)
+        act = decode_action(action, n_modes=self.cfg.communication.n_modes)
         cfg = self.cfg
         dt = cfg.time.timestep_s
         now = self.clock.now_s()
@@ -173,12 +174,12 @@ class EdgeEngineAwareEnv(gym.Env):
             baseline_energy_j=baseline_j,
             reserve_energy_j=self.storage.reserve_j(),
             sensing_energy_j=tuple(self.sensor.energy_cost_j(l) for l in range(cfg.sensing.n_levels)),
-            tx_energy_j=self.radio.tx_energy_j(),
+            tx_energy_j=tuple(self.radio.tx_energy_j(k) for k in range(self.radio.n_modes())),
             has_measurement=self.tracker.measurement is not None,
         )
         rejected = list(plan.rejected)
         sensing_level, sensing_j = plan.sensing_level, plan.sensing_energy_j
-        tx_executed, tx_j = plan.transmit, plan.tx_energy_j
+        tx_executed, tx_j, tx_mode = plan.transmit, plan.tx_energy_j, plan.mode
 
         # 2. sensing ----------------------------------------------------------
         measurement = None
@@ -192,9 +193,10 @@ class EdgeEngineAwareEnv(gym.Env):
         utility_breakdown = None
         if tx_executed:
             packet = Packet(measurement=self.tracker.measurement, sent_at_s=now)  # type: ignore[arg-type]
-            tx_success = self.radio.transmit(packet)
+            result = self.radio.transmit(packet, tx_mode)
+            tx_success = result.acked
             # without confirmations the node cannot know the outcome (None)
-            self.tracker.on_transmission(packet, tx_success if cfg.communication.ack_available else None, now)
+            self.tracker.on_transmission(packet, tx_success if cfg.communication.ack_available else None, now, mode=tx_mode, margin_db=result.margin_db)
             if tx_success:
                 utility_breakdown = self.application.receive(packet, now, truth_before)
                 utility = utility_breakdown.total
@@ -262,6 +264,7 @@ class EdgeEngineAwareEnv(gym.Env):
             wasted_j=wasted_j,
             sensing_level=sensing_level,
             tx_executed=tx_executed,
+            tx_mode=tx_mode,
             tx_success=tx_success,
             rejected=len(rejected),
             depleted=depleted,
@@ -273,12 +276,13 @@ class EdgeEngineAwareEnv(gym.Env):
         self._last_step = {
             "sensing_level": sensing_level,
             "tx_attempted": tx_executed,
+            "tx_mode": tx_mode,
             "tx_success": tx_success,
             "reward": reward,
             "utility": utility,
             "requested_action": (act.sensing_level, act.transmit),
         }
-        self._append_log(truth_after, aoi, sensing_level, tx_executed, tx_success, reward, utility)
+        self._append_log(truth_after, aoi, sensing_level, tx_executed, tx_mode, tx_success, reward, utility)
 
         terminated = bool(cfg.terminate_on_depletion and depleted)
         truncated = self._step_count >= self.max_steps
@@ -317,7 +321,9 @@ class EdgeEngineAwareEnv(gym.Env):
             "event_occurred": fs.event_occurred,
             "harvest_power_true_w": self.source.true_power_w(),
             "daily_clearness": self.source.daily_clearness,
-            "tx_success_probability": self.radio.success_probability(),
+            "path_loss_db": self.radio.path_loss_db(),
+            "tx_success_probability": self.radio.success_probability(),  # reference mode
+            "tx_success_probability_per_mode": [self.radio.success_probability(k) for k in range(self.radio.n_modes())],
             "stored_energy_j": self.storage.energy_j(),
             "app_aoi_s": self.application.age_of_information_s(),
             "app_priority": self.application.priority(),
@@ -341,9 +347,10 @@ class EdgeEngineAwareEnv(gym.Env):
             "battery_soc": self.storage.soc(),
             "stored_energy_j": self.storage.energy_j(),
             "harvested_energy_j": self._last_harvested_j,
-            "executed_action": (self._last_step["sensing_level"], int(self._last_step["tx_attempted"])),
+            "executed_action": (self._last_step["sensing_level"], self._last_step["tx_mode"] + 1 if self._last_step["tx_attempted"] else 0),
             "sensing_level": self._last_step["sensing_level"],
             "tx_attempted": self._last_step["tx_attempted"],
+            "tx_mode": self._last_step["tx_mode"],
             "tx_success": self._last_step["tx_success"],
             "rejected": list(rejected),
             "app_priority": self.application.priority(),  # what the application wants now
@@ -357,7 +364,7 @@ class EdgeEngineAwareEnv(gym.Env):
         }
         return info
 
-    def _update_metrics(self, *, harvested_j, baseline_j, sensing_j, tx_j, wasted_j, sensing_level, tx_executed, tx_success, rejected, depleted, aoi, utility, reward, comps) -> None:
+    def _update_metrics(self, *, harvested_j, baseline_j, sensing_j, tx_j, wasted_j, sensing_level, tx_executed, tx_mode, tx_success, rejected, depleted, aoi, utility, reward, comps) -> None:
         m = self.metrics
         m.steps += 1
         m.total_harvested_energy_j += harvested_j
@@ -372,8 +379,10 @@ class EdgeEngineAwareEnv(gym.Env):
                 m.n_high_quality_sensing += 1
         if tx_executed:
             m.n_transmissions += 1
+            m.transmissions_per_mode[tx_mode] = m.transmissions_per_mode.get(tx_mode, 0) + 1
             if tx_success:
                 m.n_successful_transmissions += 1
+                m.deliveries_per_mode[tx_mode] = m.deliveries_per_mode.get(tx_mode, 0) + 1
         m.n_rejected_actions += rejected
         if depleted:
             m.battery_depletion_events += 1
@@ -389,7 +398,7 @@ class EdgeEngineAwareEnv(gym.Env):
         for k, v in comps.as_dict().items():
             m.reward_components[k] = m.reward_components.get(k, 0.0) + v
 
-    def _append_log(self, truth, aoi, sensing_level, tx_executed, tx_success, reward, utility) -> None:
+    def _append_log(self, truth, aoi, sensing_level, tx_executed, tx_mode, tx_success, reward, utility) -> None:
         meas = self.tracker.measurement
         app_pkt = self.application.last_packet
         self.log.append(
@@ -402,7 +411,9 @@ class EdgeEngineAwareEnv(gym.Env):
             app_moisture=app_pkt.measurement.value if app_pkt is not None else math.nan,
             sensing_level=int(sensing_level),
             tx_attempt=int(tx_executed),
+            tx_mode=int(tx_mode),
             tx_success=int(bool(tx_success)),
+            path_loss_db=self.radio.path_loss_db(),
             aoi_s=aoi,
             priority=int(self.application.priority()),
             reward=reward,

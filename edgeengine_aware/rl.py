@@ -15,7 +15,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from .actions import N_FLAT_ACTIONS, flatten_action, unflatten_action
+from .actions import flatten_action, n_flat_actions, unflatten_action
 from .env import EdgeEngineAwareEnv
 from .interfaces import Policy
 from .observation import OBSERVATION_FIELDS
@@ -27,18 +27,20 @@ from .scenarios import SCENARIOS, get_scenario
 # Wrappers
 # ---------------------------------------------------------------------------
 class FlatActionWrapper(gym.ActionWrapper):
-    """Expose the ``MultiDiscrete([3, 2])`` action as ``Discrete(6)``.
+    """Expose the ``MultiDiscrete([3, 1 + n_modes])`` action as ``Discrete(3 * (1 + n_modes))``.
 
-    ``flat = sensing_level * 2 + transmit`` (see ``actions.py``). Needed by
-    value-based agents such as DQN; PPO/A2C work on the MultiDiscrete space directly.
+    ``flat = sensing_level * (1 + n_modes) + transmit`` (see ``actions.py``).
+    Needed by value-based agents such as DQN; PPO/A2C work on the
+    MultiDiscrete space directly.
     """
 
     def __init__(self, env: gym.Env):
         super().__init__(env)
-        self.action_space = spaces.Discrete(N_FLAT_ACTIONS)
+        self.n_modes = int(env.action_space.nvec[1]) - 1
+        self.action_space = spaces.Discrete(n_flat_actions(self.n_modes))
 
     def action(self, action):
-        return unflatten_action(int(action))
+        return unflatten_action(int(action), self.n_modes)
 
 
 class MixedScenarioEnv(EdgeEngineAwareEnv):
@@ -114,6 +116,9 @@ class SB3Policy:
         self.model = model
         self.flat_actions = flat_actions
         self.deterministic = deterministic
+        # number of radio modes, recovered from the model's action space
+        space = model.action_space
+        self.n_modes = (int(space.n) // 3 - 1) if flat_actions else int(space.nvec[1]) - 1
         self.reset()
 
     def reset(self) -> None:
@@ -122,7 +127,7 @@ class SB3Policy:
     def act(self, observation) -> np.ndarray:
         action, self._state = self.model.predict(np.asarray(observation, dtype=np.float32), state=self._state, deterministic=self.deterministic)
         if self.flat_actions:
-            return unflatten_action(int(np.asarray(action).reshape(-1)[0]))
+            return unflatten_action(int(np.asarray(action).reshape(-1)[0]), self.n_modes)
         return np.asarray(action, dtype=np.int64).reshape(-1)
 
 
@@ -225,10 +230,11 @@ def export_sb3_mlp(model: Any) -> dict[str, Any]:
 
     Returned dict::
 
-        {"type": "mlp", "input_dim": 17,
+        {"type": "mlp", "input_dim": 18,
          "layers": [{"W": [[...]], "b": [...], "activation": "tanh"|"relu"|"linear"}, ...],
          "output": "multidiscrete_logits" | "flat_q_values",
-         "output_split": [3, 2]}            # only for multidiscrete_logits
+         "output_split": [3, 4],            # only for multidiscrete_logits
+         "n_modes": 3}
     """
     import torch  # local import: torch is only needed when exporting
 
@@ -258,12 +264,14 @@ def export_sb3_mlp(model: Any) -> dict[str, Any]:
     if hasattr(policy, "q_net"):  # DQN
         add_sequential(policy.q_net.q_net, final_activation="linear")
         output, split = "flat_q_values", None
+        n_modes = int(model.action_space.n) // 3 - 1
     else:  # on-policy actor-critic
         add_sequential(policy.mlp_extractor.policy_net)
         add_sequential(torch.nn.Sequential(policy.action_net), final_activation="linear")
         output = "multidiscrete_logits"
         split = [int(n) for n in model.action_space.nvec]
-    return {"type": "mlp", "input_dim": len(layers[0]["W"][0]), "layers": layers, "output": output, "output_split": split}
+        n_modes = split[1] - 1
+    return {"type": "mlp", "input_dim": len(layers[0]["W"][0]), "layers": layers, "output": output, "output_split": split, "n_modes": n_modes}
 
 
 class NumpyMLPPolicy:
@@ -279,6 +287,7 @@ class NumpyMLPPolicy:
         self.layers = [(np.asarray(l["W"], dtype=np.float32), np.asarray(l["b"], dtype=np.float32), l["activation"]) for l in model["layers"]]
         self.output = model["output"]
         self.split = model.get("output_split")
+        self.n_modes = int(model.get("n_modes", (self.split[1] - 1) if self.split else 3))
 
     def reset(self) -> None:
         pass
@@ -296,7 +305,7 @@ class NumpyMLPPolicy:
     def act(self, observation) -> np.ndarray:
         out = self.forward(observation)
         if self.output == "flat_q_values":
-            return unflatten_action(int(np.argmax(out)))
+            return unflatten_action(int(np.argmax(out)), self.n_modes)
         n1 = self.split[0]
         return np.array([int(np.argmax(out[:n1])), int(np.argmax(out[n1:]))], dtype=np.int64)
 

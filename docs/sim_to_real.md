@@ -28,7 +28,7 @@
 Both backends implement the six protocols of `interfaces.py` — `Clock`, `EnergyStorage`,
 `EnergySource`, `Sensor`, `Radio`, `RemoteApplication`. Everything above the dashed line is
 shared code: the *same* `NodeStateTracker` turns driver readings into a `NodeState`, the
-*same* `ObservationBuilder` turns it into the 17-vector, the *same* `plan_execution`
+*same* `ObservationBuilder` turns it into the 18-vector, the *same* `plan_execution`
 applies the energy-feasibility rule, and the *same* policy object decides.
 `tests/test_deployment.py` runs `RuleBasedPolicy` against a mock board that has no ground
 truth at all, and checks that the simulator's tracker and the firmware tracker produce
@@ -41,21 +41,22 @@ identical observations from identical measurable inputs.
 | **sensor noise** | Gaussian, level-dependent σ, optional bias | drift, temperature dependence, quantisation, soil-contact variability | randomise σ (`randomization.sensor_noise`), set `SensingConfig.bias` | replay real sensor traces through the `Sensor` protocol |
 | **harvesting** | half-sine × AR(1) clouds | shading, panel soiling, angle, seasonal day length, MPPT behaviour | randomise `max_power_w`, cloud variability; change sunrise/sunset per season | replay irradiance traces (`EnergySource` from CSV) |
 | **battery** | ideal buffer, exact SoC | voltage-based SoC estimate, temperature, ageing, self-discharge, charge losses | randomise capacity; `charge_efficiency` | ageing model, SoC estimation noise on `EnergyStorage` |
-| **radio losses** | Bernoulli with slow AR(1) channel | fading, interference, gateway congestion, duty-cycle limits | randomise `base_success_prob`, `min_success_prob` | spreading factor / power actions, congestion model |
-| **communication energy** | constant per attempt | depends on SF, payload, RX windows, retries | randomise `tx_energy_j` | measured energy profile per (SF, power, payload) |
+| **radio losses** | link-budget channel: AR(1) shadowing + per-attempt fading, logistic delivery in the margin | fading, interference, gateway congestion, duty-cycle limits, multiple gateways | randomise the mean path loss (`randomization.path_loss_db`), tune fading σ / correlation | congestion model, duty-cycle enforcement, measured RSSI/SNR traces |
+| **communication energy** | constant per attempt and mode (SF7 / SF9 / SF12-like) | depends on payload, RX windows, retries, actual SF/power table of the radio | randomise mode energies together (`randomization.tx_energy`) | measured energy profile per (SF, power, payload) |
 | **clock** | exact 15-minute steps | RTC drift, wake-up jitter | none needed (policy uses relative timers) | jitter on `SimulatedClock` |
 | **environmental dynamics** | simplified ET, Poisson rain, external irrigation | real soil physics, weather fronts, crop growth | tune `AgricultureConfig`; randomise `et_rate_per_day` | field traces, crop model coupling |
 | **application** | rule-based priority, Poisson requests | human operators, other data sources | `priority_update_mode="on_uplink"` for class-A realism | replay of real request logs |
 
 ## Domain randomisation
 
-`DomainRandomizationConfig` (off by default) multiplies, at every `reset()`, the nominal
-values of sensor noise, sensing energy, transmission energy, packet success probability,
-solar intensity, cloud variability, battery capacity and baseline consumption by factors
-drawn uniformly from configurable ranges. Two design points:
+`DomainRandomizationConfig` (off by default) perturbs, at every `reset()`, the nominal
+values of sensor noise, sensing energy, transmission energy, solar intensity, cloud
+variability, battery capacity and baseline consumption by multiplicative factors, and the
+mean path loss by an additive offset in dB, all drawn uniformly from configurable ranges. Two design points:
 
 * randomisation happens in `randomize_config()` and touches only the configuration copy of
-  the current episode — the observation/action spaces do not change;
+  the current episode — the observation/action spaces do not change (the number of radio
+  modes is fixed by the base configuration);
 * the **randomised energy costs are what the node reports** in observation components
   14–16, exactly as a real device would report its own measured profile. A policy trained
   under randomisation therefore learns to *read* its cost profile rather than assume it.
@@ -71,7 +72,8 @@ env = ea.EdgeEngineAwareEnv(cfg)
 
 1. **No privileged variable may enter `NodeState`.** New observation components must come
    from something a driver can return.
-2. **Normalisation constants are part of the hardware profile** (`NodeProfile`) and are exported
+2. **Normalisation constants and the link-budget table are part of the hardware profile**
+   (`NodeProfile`: energies, transmit powers and sensitivities per mode) and are exported
    with the policy (`deployment.PolicyBundle`). Changing one without re-training invalidates
    the policy.
 3. **Action semantics are frozen** in `actions.py`; firmware must map index → operation the

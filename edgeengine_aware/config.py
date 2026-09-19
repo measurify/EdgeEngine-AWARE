@@ -14,7 +14,8 @@ Units (used consistently across the whole package)
 
 The default values describe a *small* energy-harvesting node: a few-cm^2
 solar cell that peaks at a few milliwatts, a ~300 J storage element
-(roughly a 25 mAh Li-Po cell or a supercapacitor bank) and a LoRa-class radio.
+(roughly a 25 mAh Li-Po cell or a supercapacitor bank) and a LoRa-class radio
+with three selectable modes (fast / standard / robust, 0.3 / 0.6 / 1.2 J per uplink).
 On an average day the node harvests ~55 J, its baseline load takes ~17 J, one
 high-quality sample + uplink costs 1.2 J: hourly reporting is sustainable on
 sunny days but not on cloudy ones, which is exactly the regime in which an
@@ -157,24 +158,65 @@ class SensingConfig:
 # Communication
 # ---------------------------------------------------------------------------
 @dataclass
+class RadioModeConfig:
+    """One transmission mode of the radio (a spreading factor / power setting).
+
+    The link budget of a mode is ``tx_power_dbm - path_loss_db - sensitivity_dbm``
+    (its *margin*); a mode with a longer spreading factor has a lower (better)
+    sensitivity, a longer air time and therefore a higher energy per uplink.
+    """
+
+    name: str
+    energy_j: float
+    """Energy of one uplink attempt in this mode (radio + MCU awake time) [J]."""
+
+    tx_power_dbm: float
+    """Transmit power [dBm]."""
+
+    sensitivity_dbm: float
+    """Receiver sensitivity at the gateway for this spreading factor [dBm]
+    (SX127x-class, 125 kHz: SF7 ~ -123, SF9 ~ -129, SF12 ~ -137)."""
+
+
+DEFAULT_RADIO_MODES: tuple[RadioModeConfig, ...] = (
+    RadioModeConfig("fast", energy_j=0.30, tx_power_dbm=14.0, sensitivity_dbm=-123.0),  # SF7-like
+    RadioModeConfig("standard", energy_j=0.60, tx_power_dbm=14.0, sensitivity_dbm=-129.0),  # SF9-like
+    RadioModeConfig("robust", energy_j=1.20, tx_power_dbm=14.0, sensitivity_dbm=-137.0),  # SF12-like
+)
+
+
+@dataclass
 class CommunicationConfig:
-    """Abstract low-power long-range link (LoRa-like)."""
+    """Abstract low-power long-range link (LoRa-like) with a link-budget channel.
 
-    tx_energy_j: float = 0.60
-    """Energy of one uplink attempt (radio + MCU awake time) [J]. Consumed
-    whether or not the packet is delivered."""
+    delivery probability of mode k at time t:
+        margin_k(t) = tx_power_k - path_loss(t) - sensitivity_k
+        p_k(t)      = 1 / (1 + exp(-margin_k(t) / margin_scale_db))
+        path_loss(t) = path_loss_mean_db + slow_fading(t) + fast_fading   (dB)
 
-    base_success_prob: float = 0.90
-    """Delivery probability under nominal channel conditions."""
+    ``slow_fading`` is an AR(1) process (shadowing, vegetation, humidity);
+    ``fast_fading`` is redrawn at every attempt. With the defaults the
+    *standard* mode has a mean margin of +4 dB (p ~ 0.9), the *fast* mode
+    -2 dB (p ~ 0.2 on average but ~0.9 when the slow fading is favourable, at
+    half the energy) and the *robust* mode +12 dB (p ~ 1, at twice the energy).
+    """
 
-    min_success_prob: float = 0.30
-    """Lower bound of the delivery probability under poor channel conditions."""
+    modes: tuple[RadioModeConfig, ...] = DEFAULT_RADIO_MODES
+    """Selectable transmission modes; the action ``transmit = k`` (k >= 1) uses
+    ``modes[k - 1]``. A single-entry tuple reproduces a binary transmit action."""
 
-    channel_autocorr: float = 0.9
-    """AR(1) coefficient of the slow channel-quality process."""
+    reference_mode: int = 1
+    """Index of the mode whose energy is reported in the observation and used
+    by the simple policies when they have no link estimate."""
 
-    channel_noise_std: float = 0.10
-    """Std of the channel-quality perturbation per step."""
+    path_loss_mean_db: float = 139.0
+    slow_fading_std_db: float = 5.0
+    slow_fading_autocorr: float = 0.97
+    """AR(1) coefficient per step (0.97 at 15 min ~ 8 h correlation time)."""
+
+    fast_fading_std_db: float = 2.0
+    margin_scale_db: float = 1.5
+    """Softness of the delivery curve around zero margin."""
 
     ack_available: bool = True
     """Whether the node learns if an uplink was delivered (confirmed uplink /
@@ -182,12 +224,35 @@ class CommunicationConfig:
     was delivered: its estimate of the information age at the application
     becomes optimistic and its link-quality indicator stays at 1."""
 
+    ack_margin_noise_db: float = 1.0
+    """Std of the noise on the link margin the node measures from an ACK
+    (SNR estimate), i.e. on its path-loss estimate."""
+
     priority_update_mode: str = "immediate"
     """How the node learns the application priority.
     'immediate' : the node always knows the current priority (e.g. a listening
                   downlink window or a class-C style device).
     'on_uplink' : the priority is refreshed only after a *successful* uplink,
                   as in a LoRaWAN class-A downlink piggybacked on the ACK."""
+
+    @property
+    def n_modes(self) -> int:
+        return len(self.modes)
+
+    @property
+    def tx_energy_j(self) -> float:
+        """Energy of the reference mode [J] (backwards-compatible accessor)."""
+        return self.modes[self.reference_mode].energy_j
+
+    def mean_margin_db(self, mode: int) -> float:
+        m = self.modes[mode]
+        return m.tx_power_dbm - self.path_loss_mean_db - m.sensitivity_dbm
+
+
+def single_mode_radio(energy_j: float = 0.60, mean_margin_db: float = 4.0) -> CommunicationConfig:
+    """A CommunicationConfig with one transmission mode (binary transmit action)."""
+    mode = RadioModeConfig("standard", energy_j=energy_j, tx_power_dbm=14.0, sensitivity_dbm=-129.0)
+    return CommunicationConfig(modes=(mode,), reference_mode=0, path_loss_mean_db=14.0 + 129.0 - mean_margin_db)
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +439,10 @@ class ObservationConfig:
     """Distance (moisture units) to the nearest threshold over which the
     node-side importance indicator decays."""
 
+    path_loss_min_db: float = 110.0
+    path_loss_max_db: float = 170.0
+    """Range mapped to [0, 1] in the path-loss observation (1 = unknown / worst)."""
+
 
 # ---------------------------------------------------------------------------
 # Domain randomisation
@@ -390,7 +459,8 @@ class DomainRandomizationConfig:
     sensor_noise: tuple[float, float] = (0.7, 1.5)
     sensing_energy: tuple[float, float] = (0.8, 1.3)
     tx_energy: tuple[float, float] = (0.8, 1.3)
-    tx_success_prob: tuple[float, float] = (0.8, 1.05)
+    path_loss_db: tuple[float, float] = (-3.0, 3.0)
+    """Additive offset [dB] on the mean path loss (this one is additive, not multiplicative)."""
     solar_intensity: tuple[float, float] = (0.6, 1.2)
     cloud_variability: tuple[float, float] = (0.5, 1.5)
     battery_capacity: tuple[float, float] = (0.8, 1.2)
@@ -444,12 +514,16 @@ class EdgeEngineAwareConfig:
             raise ValueError("start_hour must be in [0, 24)")
         if not 0.0 < self.storage.charge_efficiency <= 1.0:
             raise ValueError("charge_efficiency must be in (0, 1]")
-        if not 0.0 <= self.communication.min_success_prob <= self.communication.base_success_prob:
-            raise ValueError("min_success_prob must be in [0, base_success_prob]")
+        if self.communication.margin_scale_db <= 0:
+            raise ValueError("margin_scale_db must be positive")
         if self.sensing.energy_j[0] != 0.0:
             raise ValueError("sensing level 0 (no sensing) must have zero energy cost")
-        if not 0.0 < self.communication.base_success_prob <= 1.0:
-            raise ValueError("base_success_prob must be in (0, 1]")
+        if self.communication.n_modes < 1:
+            raise ValueError("at least one radio mode is required")
+        if not 0 <= self.communication.reference_mode < self.communication.n_modes:
+            raise ValueError("reference_mode must index an existing radio mode")
+        if any(m.energy_j <= 0 for m in self.communication.modes):
+            raise ValueError("radio mode energies must be positive")
         if self.communication.priority_update_mode not in ("immediate", "on_uplink"):
             raise ValueError("priority_update_mode must be 'immediate' or 'on_uplink'")
         if not self.agriculture.critical_threshold < self.agriculture.warning_threshold:
@@ -484,8 +558,9 @@ def randomize_config(base: EdgeEngineAwareConfig, rng) -> EdgeEngineAwareConfig:
     cfg.sensing.noise_std = tuple(s * k for s in cfg.sensing.noise_std)  # type: ignore[assignment]
     k = f(dr.sensing_energy)
     cfg.sensing.energy_j = tuple(e * k for e in cfg.sensing.energy_j)  # type: ignore[assignment]
-    cfg.communication.tx_energy_j *= f(dr.tx_energy)
-    cfg.communication.base_success_prob = min(1.0, cfg.communication.base_success_prob * f(dr.tx_success_prob))
+    k = f(dr.tx_energy)
+    cfg.communication.modes = tuple(dataclasses.replace(m, energy_j=m.energy_j * k) for m in cfg.communication.modes)
+    cfg.communication.path_loss_mean_db += f(dr.path_loss_db)
     cfg.harvesting.max_power_w *= f(dr.solar_intensity)
     k = f(dr.cloud_variability)
     cfg.harvesting.cloud_noise_std *= k

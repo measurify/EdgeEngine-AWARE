@@ -61,7 +61,7 @@ def test_per_step_energy_balance():
         _, _, _, _, info = e.step(e.action_space.sample())
         spent = e.cfg.mcu.baseline_power_w * e.timestep_s
         spent += e.cfg.sensing.energy_j[info["sensing_level"]]
-        spent += e.cfg.communication.tx_energy_j if info["tx_attempted"] else 0.0
+        spent += e.cfg.communication.modes[info["tx_mode"]].energy_j if info["tx_attempted"] else 0.0
         wasted = e.storage.wasted_j - wasted_before
         expected = before - spent + info["harvested_energy_j"] - wasted
         assert e.storage.energy_j() == pytest.approx(min(expected, e.storage.capacity_j()), abs=1e-6)

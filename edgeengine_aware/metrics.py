@@ -24,6 +24,8 @@ class EpisodeMetrics:
     n_high_quality_sensing: int = 0
     n_transmissions: int = 0
     n_successful_transmissions: int = 0
+    transmissions_per_mode: dict[int, int] = field(default_factory=dict)
+    deliveries_per_mode: dict[int, int] = field(default_factory=dict)
     n_rejected_actions: int = 0
     battery_depletion_events: int = 0
     steps_low_battery: int = 0
@@ -79,6 +81,7 @@ class EpisodeMetrics:
             ("n_high_quality_sensing", "{}"),
             ("n_transmissions", "{}"),
             ("n_successful_transmissions", "{}"),
+            ("transmissions_per_mode", "{}"),
             ("delivery_ratio", "{:.2f}"),
             ("n_rejected_actions", "{}"),
             ("average_battery_soc", "{:.3f}"),
@@ -105,7 +108,9 @@ class EpisodeLog:
     app_moisture: list[float] = field(default_factory=list)  # nan when nothing received yet
     sensing_level: list[int] = field(default_factory=list)
     tx_attempt: list[int] = field(default_factory=list)
+    tx_mode: list[int] = field(default_factory=list)  # -1 when no transmission
     tx_success: list[int] = field(default_factory=list)
+    path_loss_db: list[float] = field(default_factory=list)
     aoi_s: list[float] = field(default_factory=list)
     priority: list[int] = field(default_factory=list)
     reward: list[float] = field(default_factory=list)

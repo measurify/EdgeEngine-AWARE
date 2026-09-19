@@ -57,18 +57,24 @@ def test_observations_in_space_for_random_actions(env):
 
 def test_observation_dimension_matches_documentation(env):
     obs, _ = env.reset(seed=0)
-    assert obs.shape[0] == len(OBSERVATION_FIELDS) == env.obs_builder.dim == 17
+    assert obs.shape[0] == len(OBSERVATION_FIELDS) == env.obs_builder.dim == 18
     assert list(env.obs_builder.names) == [f.name for f in OBSERVATION_FIELDS]
-    assert env.observation_space.shape == (17,)
+    assert env.observation_space.shape == (18,)
+    assert list(env.action_space.nvec) == [3, 4]
 
 
 def test_action_encoding_roundtrip():
     for i in range(N_FLAT_ACTIONS):
         assert flatten_action(unflatten_action(i)) == i
+    for n_modes in (1, 2, 5):
+        for i in range(3 * (1 + n_modes)):
+            assert flatten_action(unflatten_action(i, n_modes), n_modes) == i
     with pytest.raises(ValueError):
         ea.decode_action([3, 0])
     with pytest.raises(ValueError):
-        ea.decode_action([0, 2])
+        ea.decode_action([0, 4], n_modes=3)
+    a = ea.decode_action([1, 3])
+    assert a.transmits and a.mode == 2
 
 
 def test_truncation_at_expected_step(env):
@@ -116,14 +122,12 @@ def test_termination_on_depletion_option():
 
 def test_failed_transmission_consumes_energy_and_updates_nothing_at_app():
     cfg = ea.default_config()
-    cfg.communication.min_success_prob = 0.0
-    cfg.communication.channel_noise_std = 0.0
-    cfg.communication.base_success_prob = 1e-9  # (practically) never delivers
+    cfg.communication.path_loss_mean_db = 1000.0  # never delivers
     e = ea.EdgeEngineAwareEnv(cfg)
     e.reset(seed=0)
     e_before = e.storage.energy_j()
-    _, _, _, _, info = e.step([2, 1])
-    assert info["tx_attempted"] and info["tx_success"] is False
+    _, _, _, _, info = e.step([2, 2])  # standard mode
+    assert info["tx_attempted"] and info["tx_success"] is False and info["tx_mode"] == 1
     assert info["reward_components"]["communication_cost"] > 0
     assert info["reward_components"]["application_utility"] == 0.0
     assert e.application.last_packet is None
@@ -163,11 +167,12 @@ def test_observation_contains_no_privileged_information(env):
     env.field.moisture = 0.0
     env.field.temperature = 99.0
     env.source._power_w = 1.0
+    env.radio._slow_db = 40.0  # channel state is hidden
     env.application._priority = 2  # not yet delivered to the node
     obs_b = env.obs_builder.build(env.node_state())
     np.testing.assert_array_equal(obs_a, obs_b)
     names = env.obs_builder.names
-    forbidden = {"true", "future", "clearness", "success_prob", "irradiance"}
+    forbidden = {"true", "future", "clearness", "success_prob", "irradiance", "fading"}
     assert not any(any(f in n for f in forbidden) for n in names)
 
 
@@ -245,12 +250,10 @@ def test_initial_harvest_observation_is_not_the_upcoming_interval():
 def test_unconfirmed_uplinks_keep_link_quality_and_assume_delivery():
     cfg = ea.default_config()
     cfg.communication.ack_available = False
-    cfg.communication.min_success_prob = 0.0
-    cfg.communication.channel_noise_std = 0.0
-    cfg.communication.base_success_prob = 1e-9  # nothing is ever delivered ...
+    cfg.communication.path_loss_mean_db = 1000.0  # nothing is ever delivered ...
     e = ea.EdgeEngineAwareEnv(cfg)
     e.reset(seed=0)
-    obs, _, _, _, info = e.step([2, 1])
+    obs, _, _, _, info = e.step([2, 2])
     assert info["tx_success"] is False
     ns = e.node_state()
     assert ns.has_reported  # ... but the node assumes it was
@@ -265,7 +268,7 @@ def test_render_before_reset_does_not_crash():
 
 def test_config_validation():
     cfg = ea.default_config()
-    cfg.communication.min_success_prob = 0.95
+    cfg.communication.reference_mode = 7
     with pytest.raises(ValueError):
         ea.EdgeEngineAwareEnv(cfg)
     cfg = ea.default_config()
@@ -292,3 +295,46 @@ def test_human_render_on_headless_backend_closes_figures():
         e.render()
         e.close()
     assert len(plt.get_fignums()) == before
+
+
+def test_radio_modes_energy_and_link_estimate():
+    cfg = ea.default_config()
+    cfg.communication.slow_fading_std_db = 0.0
+    cfg.communication.fast_fading_std_db = 0.0
+    cfg.communication.ack_margin_noise_db = 0.0
+    cfg.communication.margin_scale_db = 1e-3  # deterministic: delivered iff margin > 0
+    e = ea.EdgeEngineAwareEnv(cfg)
+    e.reset(seed=0)
+    idx = e.obs_builder.index("path_loss_est")
+    modes = cfg.communication.modes
+    # robust mode: +12 dB margin -> delivered, energy 1.2 J, exact path-loss estimate
+    _, _, _, _, info = e.step([2, 3])
+    assert info["tx_success"] and info["tx_mode"] == 2
+    assert info["metrics"]["communication_energy_j"] == pytest.approx(modes[2].energy_j)
+    assert e.tracker.path_loss_est_db == pytest.approx(cfg.communication.path_loss_mean_db)
+    obs = e.obs_builder.build(e.node_state())
+    o = cfg.observation
+    assert obs[idx] == pytest.approx((cfg.communication.path_loss_mean_db - o.path_loss_min_db) / (o.path_loss_max_db - o.path_loss_min_db), abs=1e-6)
+    # fast mode: -2 dB margin -> lost, energy still spent, estimate = max(current, mode link budget)
+    _, _, _, _, info = e.step([0, 1])
+    assert info["tx_attempted"] and info["tx_success"] is False and info["tx_mode"] == 0
+    assert info["metrics"]["communication_energy_j"] == pytest.approx(modes[2].energy_j + modes[0].energy_j)
+    assert e.tracker.path_loss_est_db == pytest.approx(max(cfg.communication.path_loss_mean_db, modes[0].tx_power_dbm - modes[0].sensitivity_dbm))
+    # a lost uplink with no prior estimate sets the estimate to the mode's link budget
+    e.reset(seed=0)
+    e.step([2, 1])
+    assert e.tracker.path_loss_est_db == pytest.approx(modes[0].tx_power_dbm - modes[0].sensitivity_dbm)
+
+
+def test_single_mode_radio_reduces_to_binary_action():
+    from edgeengine_aware.config import single_mode_radio
+
+    cfg = ea.default_config()
+    cfg.communication = single_mode_radio(energy_j=0.6)
+    e = ea.EdgeEngineAwareEnv(cfg)
+    assert list(e.action_space.nvec) == [3, 2]
+    e.reset(seed=0)
+    _, _, _, _, info = e.step([2, 1])
+    assert info["tx_attempted"] and info["tx_mode"] == 0
+    with pytest.raises(ValueError):
+        e.step([2, 2])

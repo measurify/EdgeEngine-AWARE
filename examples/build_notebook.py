@@ -71,7 +71,7 @@ md(r"""
 `EdgeEngineAwareEnv` is a standard `gymnasium.Env`. All physical and reward
 parameters live in an `EdgeEngineAwareConfig` dataclass tree; here we use the
 defaults (15-minute steps, 7-day episodes, a ~300 J storage element, a
-few-milliwatt solar cell, a LoRa-class radio).
+few-milliwatt solar cell, a LoRa-class radio with three selectable modes).
 """)
 
 code(r"""
@@ -86,7 +86,7 @@ print("Steps / episode  :", env.max_steps, f"({config.time.episode_days:g} days 
 md(r"""
 ## 3. The observation vector
 
-The policy sees a 17-dimensional float32 vector in $[0,1]^{17}$. Every entry
+The policy sees an 18-dimensional float32 vector in $[0,1]^{18}$. Every entry
 is something a microcontroller can compute from its fuel gauge, harvester
 monitor, RTC, sensor driver, radio ACKs and the last downlink message.
 **No ground truth** (true soil moisture, future irradiance, channel state) is
@@ -98,16 +98,19 @@ print(env.obs_builder.describe())
 """)
 
 md(r"""
-The **action** is a `MultiDiscrete([3, 2])` pair *(sensing level, transmit)*:
+The **action** is a `MultiDiscrete([3, 4])` pair *(sensing level, transmit)*:
 
 | sensing level | meaning | transmit | meaning |
 |---|---|---|---|
 | 0 | keep the stored measurement | 0 | radio off |
-| 1 | low-cost sample (cheap, noisy) | 1 | send the latest stored measurement |
-| 2 | high-quality sample (expensive, accurate) | | |
+| 1 | low-cost sample (cheap, noisy) | 1 | send the stored sample in the **fast** mode (SF7-like, 0.3 J, short range) |
+| 2 | high-quality sample (expensive, accurate) | 2 | … in the **standard** mode (SF9-like, 0.6 J) |
+| | | 3 | … in the **robust** mode (SF12-like, 1.2 J, long range) |
 
-Sensing happens *before* transmission inside a step, so `(2, 1)` means
-"take a good sample and send it right away".
+Sensing happens *before* transmission inside a step, so `(2, 2)` means "take a good sample
+and send it right away in the standard mode". Whether an uplink gets through depends on the
+link margin of the chosen mode against a slowly fading path loss; the node learns the path loss
+from the acknowledgements (observation `path_loss_est`).
 """)
 
 code(r"""
@@ -115,16 +118,17 @@ obs, info = env.reset(seed=0)
 for name, value in env.obs_builder.to_dict(obs).items():
     print(f"{name:22s} {value:6.3f}")
 a = env.action_space.sample()
-print("\nrandom action:", a, "->", ea.describe_action(a))
+print("\nrandom action:", a, "->", ea.describe_action(a, tuple(m.name for m in config.communication.modes)))
 """)
 
 md(r"""
 ## 4. The rule-based baseline
 
 `RuleBasedPolicy` implements the Gymnasium-independent `Policy` protocol
-(`act(observation) -> action`). It only reads the observation vector, so the
-same object can run inside the simulator or inside the firmware loop of
-`edgeengine_aware.deployment.NodeController`. Its rules (see the docstring):
+(`act(observation) -> action`). It only reads the observation vector (plus the flash constants
+of the `NodeProfile`, for the radio link-budget table), so the same object can run inside the
+simulator or inside the firmware loop of `edgeengine_aware.deployment.NodeController`. Its
+rules (see the docstring):
 
 1. **Deep economy** — SoC below 20 %: one high-quality report every 8 h, nothing else.
 2. **Retry** — a fresh high-quality sample that was not acknowledged is retransmitted.
@@ -136,6 +140,10 @@ same object can run inside the simulator or inside the firmware loop of
 4. **Event report** — a cheap check that differs a lot from the reported value, or an
    important value near a stress threshold: high-quality sample + transmit now.
 5. **Check** — otherwise, a low-cost sample every hour (never in economy mode).
+
+**Radio mode:** the cheapest mode whose expected margin — from the node's path-loss estimate
+and the link-budget table — is at least 4 dB; one mode up after recent failures; the standard
+mode before the first acknowledgement.
 
 It is deliberately simple and interpretable, not optimal.
 """)
@@ -154,7 +162,9 @@ Matplotlib window and `render_mode="ansi"` prints a compact text dashboard.
 """)
 
 code(r"""
-policy = RuleBasedPolicy()
+from edgeengine_aware.observation import NodeProfile
+profile = NodeProfile.from_config(config)
+policy = RuleBasedPolicy(profile=profile)
 obs, info = env.reset(seed=42)
 policy.reset()
 
@@ -189,7 +199,7 @@ and the reward.
 code(r"""
 env_txt = ea.EdgeEngineAwareEnv(config, render_mode="ansi")
 o, _ = env_txt.reset(seed=42)
-p = RuleBasedPolicy()
+p = RuleBasedPolicy(profile=profile)
 for _ in range(40):
     o, *_ = env_txt.step(p.act(o))
 print(env_txt.render())
@@ -266,19 +276,21 @@ def evaluate(policy_factory, seeds=range(5), cfg=config):
     return {k: float(np.mean([r[k] for r in rows])) for k in rows[0]}
 
 baselines = {
-    "rule-based": RuleBasedPolicy,
+    "rule-based (adaptive radio)": lambda: RuleBasedPolicy(profile=profile),
+    "rule-based (standard mode only)": RuleBasedPolicy,
     "random": lambda: RandomPolicy(seed=0),
-    "periodic 1 h, high-quality": lambda: PeriodicPolicy(period_steps=4, sensing_level=2),
-    "periodic 1 h, low-cost": lambda: PeriodicPolicy(period_steps=4, sensing_level=1),
-    "periodic 3 h, high-quality": lambda: PeriodicPolicy(period_steps=12, sensing_level=2),
+    "periodic 1 h, HQ, standard mode": lambda: PeriodicPolicy(period_steps=4, sensing_level=2, tx=2),
+    "periodic 1 h, HQ, fast mode": lambda: PeriodicPolicy(period_steps=4, sensing_level=2, tx=1),
+    "periodic 3 h, HQ, standard mode": lambda: PeriodicPolicy(period_steps=12, sensing_level=2, tx=2),
+    "periodic 3 h, HQ, robust mode": lambda: PeriodicPolicy(period_steps=12, sensing_level=2, tx=3),
     "always on": AlwaysOnPolicy,
 }
 results = {name: evaluate(f) for name, f in baselines.items()}
 
-header = f"{'policy':28s} {'reward':>8s} {'utility':>8s} {'harv J':>7s} {'cons J':>7s} {'sens':>5s} {'tx':>5s} {'deliv':>5s} {'minSoC':>7s} {'low%':>5s} {'depl':>5s} {'AoI h':>6s}"
+header = f"{'policy':34s} {'reward':>8s} {'utility':>8s} {'harv J':>7s} {'cons J':>7s} {'sens':>5s} {'tx':>5s} {'deliv':>5s} {'minSoC':>7s} {'low%':>5s} {'depl':>5s} {'AoI h':>6s}"
 print(header); print("-" * len(header))
 for name, r in results.items():
-    print(f"{name:28s} {r['reward']:8.1f} {r['utility']:8.1f} {r['harvested_J']:7.0f} {r['consumed_J']:7.0f} {r['sensing']:5.0f} {r['tx']:5.0f} {r['delivered']:5.0f} {r['min_soc']:7.2f} {100*r['low_batt_frac']:5.0f} {r['depletions']:5.1f} {r['aoi_h']:6.2f}")
+    print(f"{name:34s} {r['reward']:8.1f} {r['utility']:8.1f} {r['harvested_J']:7.0f} {r['consumed_J']:7.0f} {r['sensing']:5.0f} {r['tx']:5.0f} {r['delivered']:5.0f} {r['min_soc']:7.2f} {100*r['low_batt_frac']:5.0f} {r['depletions']:5.1f} {r['aoi_h']:6.2f}")
 """)
 
 md(r"""
@@ -286,13 +298,13 @@ Reading the table:
 
 * **always on** collects the most information but drains the ~300 J storage in
   a couple of days, browns out and is heavily penalised;
-* **periodic** duty-cycling is a strong baseline when the period happens to match the
-  energy budget — but it is blind to weather, to the battery and to what the
-  application actually needs;
-* the **rule-based** policy stays sustainable while reacting to priority and to
-  sudden changes; its margin over the best fixed period is small because the
-  utility is deliberately flat when the field is stable — RL must earn its reward
-  around events, thresholds and cloudy periods, not by transmitting more.
+* **periodic** duty-cycling is a strong baseline when the period *and the radio mode* happen
+  to match the energy budget and the link — but it is blind to weather, to the battery, to the
+  link and to what the application actually needs (the fast mode loses most packets, the
+  robust one is safe but twice as expensive);
+* the **rule-based** policy stays sustainable while reacting to priority, to sudden changes and
+  to the link estimate; choosing the radio mode from the path-loss estimate is worth several
+  reward units over the same rules with a fixed mode.
 """)
 
 md(r"""
@@ -312,22 +324,29 @@ def with_changes(**changes):
         setattr(obj, last, value)
     return cfg
 
+import dataclasses
+def with_radio_energy_scale(k):
+    cfg = ea.default_config()
+    cfg.communication.modes = tuple(dataclasses.replace(m, energy_j=m.energy_j * k) for m in cfg.communication.modes)
+    return cfg
+
 scenarios = {
     "default": ea.default_config(),
     "half solar panel": with_changes(**{"harvesting.max_power_w": 0.0025}),
-    "3x transmission energy": with_changes(**{"communication.tx_energy_j": 1.8}),
+    "3x transmission energy": with_radio_energy_scale(3.0),
     "cloudier climate": with_changes(**{"harvesting.clearness_mean": 0.4}),
+    "far from the gateway (+6 dB)": with_changes(**{"communication.path_loss_mean_db": 145.0}),
 }
 for name, cfg in scenarios.items():
-    r = evaluate(RuleBasedPolicy, cfg=cfg)
-    print(f"{name:24s} reward {r['reward']:7.1f}  utility {r['utility']:6.1f}  tx {r['tx']:5.0f}  min SoC {r['min_soc']:.2f}  low-battery {100*r['low_batt_frac']:4.0f}%  AoI {r['aoi_h']:.2f} h")
+    r = evaluate(lambda cfg=cfg: RuleBasedPolicy(profile=NodeProfile.from_config(cfg)), cfg=cfg)
+    print(f"{name:30s} reward {r['reward']:7.1f}  utility {r['utility']:6.1f}  tx {r['tx']:5.0f}  min SoC {r['min_soc']:.2f}  low-battery {100*r['low_batt_frac']:4.0f}%  AoI {r['aoi_h']:.2f} h")
 """)
 
 code(r"""
 fig, axes = plt.subplots(1, 2, figsize=(13, 3.8), sharey=True)
 for name, cfg in [("default", scenarios["default"]), ("half solar panel", scenarios["half solar panel"])]:
     e = ea.EdgeEngineAwareEnv(cfg)
-    run_episode(e, RuleBasedPolicy(), seed=3)
+    run_episode(e, RuleBasedPolicy(profile=NodeProfile.from_config(cfg)), seed=3)
     axes[0].plot(np.asarray(e.log.time_s) / 86400, e.log.soc, label=name)
     axes[1].plot(np.asarray(e.log.time_s) / 86400, np.cumsum(e.log.reward), label=name)
 axes[0].set_title("Battery SoC"); axes[0].set_xlabel("days"); axes[0].axhline(config.reward.safe_soc, color="tab:red", ls="--", lw=0.8); axes[0].legend(); axes[0].grid(alpha=0.3)
@@ -353,11 +372,12 @@ from edgeengine_aware.observation import NodeProfile
 
 profile = NodeProfile.from_config(config)
 hw = make_mock_backend(profile)                       # fake drivers + a minimal power-path emulation
-controller = NodeController(hw, profile, RuleBasedPolicy(), priority_update_mode=config.communication.priority_update_mode)
+controller = NodeController(hw, profile, RuleBasedPolicy(profile=profile), priority_update_mode=config.communication.priority_update_mode)
 for cycle in range(24):
     report = controller.run_cycle()
     if report.executed_sensing_level or report.executed_transmit:
-        print(f"t={report.time_s/3600:5.2f} h  SoC={report.observation[0]:.3f}  requested={report.requested_action}  sensed level {report.executed_sensing_level}  tx={report.executed_transmit} ack={report.tx_success}")
+        mode = config.communication.modes[report.tx_mode].name if report.executed_transmit else "-"
+        print(f"t={report.time_s/3600:5.2f} h  SoC={report.observation[0]:.3f}  requested={report.requested_action}  sensed level {report.executed_sensing_level}  tx={mode} ack={report.tx_success}")
     hw.end_of_cycle(report)                            # the board sleeps until the next wake-up
 
 bundle = export_policy(controller.policy, profile, policy_type="rule_based", notes="baseline exported from the notebook")
@@ -369,8 +389,8 @@ md(r"""
 ## 10. Where to go from here
 
 * **Train an RL agent.** The environment is registered as `EdgeEngineAware-v0` and is
-  compatible with Stable-Baselines3 (`MultiDiscrete` actions → PPO / A2C; flatten to 6
-  actions for DQN with `edgeengine_aware.actions.flatten_action`).
+  compatible with Stable-Baselines3 (`MultiDiscrete` actions → PPO / A2C; flatten to 12
+  actions for DQN with `rl.FlatActionWrapper`). `examples/train_rl.ipynb` does exactly this.
 * **Domain randomisation.** Set `config.randomization.enabled = True` to perturb
   sensor noise, energy costs, packet success probability, solar intensity, cloudiness,
   battery capacity and MCU consumption at every reset.

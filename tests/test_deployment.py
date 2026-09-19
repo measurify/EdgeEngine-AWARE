@@ -95,11 +95,14 @@ class _Replay:
         return self.rec["profile"].sensing_noise_std[level]
 
     # Radio
-    def transmit(self, packet):
+    def transmit(self, packet, mode):
         return self.rec["ack"][self.k]
 
-    def tx_energy_j(self):
-        return self.rec["profile"].tx_energy_j
+    def tx_energy_j(self, mode):
+        return self.rec["profile"].tx_energy_j[mode]
+
+    def n_modes(self):
+        return self.rec["profile"].n_modes
 
     # RemoteApplication (downlink): what the node reads at wake-up in 'immediate'
     # mode, or the content of the downlink that came with the ACK in 'on_uplink' mode
@@ -145,10 +148,10 @@ def test_firmware_loop_reproduces_simulator_observations(mode):
         last["m"] = m
         return m
 
-    def tapped_tx(packet):
-        ok = real_tx(packet)
-        last["ack"] = ok
-        return ok
+    def tapped_tx(packet, mode):
+        res = real_tx(packet, mode)
+        last["ack"] = res
+        return res
 
     env.sensor.read, env.radio.transmit = tapped_read, tapped_tx
     rec["capacity"] = env.storage.capacity_j()
@@ -188,12 +191,20 @@ def test_node_state_has_only_measurable_fields():
 
 
 def test_plan_execution_shared_rule():
-    plan = plan_execution([2, 1], stored_energy_j=10.0, baseline_energy_j=0.2, reserve_energy_j=0.2, sensing_energy_j=(0.0, 0.1, 0.6), tx_energy_j=0.6, has_measurement=False)
-    assert plan.sensing_level == 2 and plan.transmit and plan.rejected == ()
-    plan = plan_execution([2, 1], stored_energy_j=1.0, baseline_energy_j=0.2, reserve_energy_j=0.2, sensing_energy_j=(0.0, 0.1, 0.6), tx_energy_j=0.6, has_measurement=True)
-    assert plan.sensing_level == 2 and not plan.transmit and plan.rejected == ("transmit:insufficient_energy",)
-    plan = plan_execution([0, 1], stored_energy_j=10.0, baseline_energy_j=0.2, reserve_energy_j=0.2, sensing_energy_j=(0.0, 0.1, 0.6), tx_energy_j=0.6, has_measurement=False)
+    modes = (0.3, 0.6, 1.2)
+    plan = plan_execution([2, 2], stored_energy_j=10.0, baseline_energy_j=0.2, reserve_energy_j=0.2, sensing_energy_j=(0.0, 0.1, 0.6), tx_energy_j=modes, has_measurement=False)
+    assert plan.sensing_level == 2 and plan.transmit and plan.mode == 1 and plan.tx_energy_j == 0.6 and plan.rejected == ()
+    plan = plan_execution([2, 3], stored_energy_j=1.5, baseline_energy_j=0.2, reserve_energy_j=0.2, sensing_energy_j=(0.0, 0.1, 0.6), tx_energy_j=modes, has_measurement=True)
+    assert plan.sensing_level == 2 and not plan.transmit and plan.mode == -1 and plan.rejected == ("transmit:insufficient_energy",)
+    plan = plan_execution([2, 1], stored_energy_j=1.5, baseline_energy_j=0.2, reserve_energy_j=0.2, sensing_energy_j=(0.0, 0.1, 0.6), tx_energy_j=modes, has_measurement=True)
+    assert plan.transmit and plan.mode == 0 and plan.tx_energy_j == 0.3  # the cheap mode still fits
+    plan = plan_execution([0, 1], stored_energy_j=10.0, baseline_energy_j=0.2, reserve_energy_j=0.2, sensing_energy_j=(0.0, 0.1, 0.6), tx_energy_j=modes, has_measurement=False)
     assert plan.rejected == ("transmit:no_measurement",) and plan.tx_energy_j == 0.0
+    # a scalar energy is a single-mode radio with the binary action
+    plan = plan_execution([1, 1], stored_energy_j=10.0, baseline_energy_j=0.2, reserve_energy_j=0.2, sensing_energy_j=(0.0, 0.1, 0.6), tx_energy_j=0.6, has_measurement=True)
+    assert plan.transmit and plan.mode == 0
+    with pytest.raises(ValueError):
+        plan_execution([1, 2], stored_energy_j=10.0, baseline_energy_j=0.2, reserve_energy_j=0.2, sensing_energy_j=(0.0, 0.1, 0.6), tx_energy_j=0.6, has_measurement=True)
 
 
 def test_policy_export_roundtrip(tmp_path):
@@ -203,16 +214,16 @@ def test_policy_export_roundtrip(tmp_path):
     path = bundle.save(tmp_path / "policy.json")
     loaded = PolicyBundle.load(path)
     assert loaded.observation_names == [f.name for f in OBSERVATION_FIELDS]
-    assert loaded.observation_dim == 17
-    assert loaded.action_encoding["nvec"] == [3, 2]
+    assert loaded.observation_dim == 18
+    assert loaded.action_encoding["nvec"] == [3, 4] and loaded.action_encoding["n_flat"] == 12
     assert loaded.model["soc_critical"] == ea.RuleBasedParams().soc_critical
-    assert loaded.profile["tx_energy_j"] == cfg.communication.tx_energy_j
+    assert loaded.profile["tx_energy_j"] == [m.energy_j for m in cfg.communication.modes]
     json.loads(path.read_text())  # valid JSON
 
 
 def test_export_of_mlp_like_parameters(tmp_path):
     profile = NodeProfile.from_config(ea.default_config())
-    w = {"layers": [{"W": np.zeros((17, 8)).tolist(), "b": [0.0] * 8, "act": "relu"}, {"W": np.zeros((8, 6)).tolist(), "b": [0.0] * 6, "act": "linear"}]}
+    w = {"layers": [{"W": np.zeros((18, 8)).tolist(), "b": [0.0] * 8, "act": "relu"}, {"W": np.zeros((8, 12)).tolist(), "b": [0.0] * 12, "act": "linear"}]}
 
     class Dummy:
         def act(self, o):
@@ -223,4 +234,4 @@ def test_export_of_mlp_like_parameters(tmp_path):
 
     b = export_policy(Dummy(), profile, policy_type="mlp", model=w)
     b.save(tmp_path / "mlp.json")
-    assert PolicyBundle.load(tmp_path / "mlp.json").model["layers"][1]["W"][0] == [0.0] * 6
+    assert PolicyBundle.load(tmp_path / "mlp.json").model["layers"][1]["W"][0] == [0.0] * 12

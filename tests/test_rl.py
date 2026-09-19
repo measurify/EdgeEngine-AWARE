@@ -30,11 +30,11 @@ def test_get_scenario_returns_fresh_copies():
 
 def test_flat_action_wrapper_roundtrip():
     env = make_env("default", flat_actions=True)
-    assert isinstance(env.action_space, spaces.Discrete) and env.action_space.n == N_FLAT_ACTIONS
+    assert isinstance(env.action_space, spaces.Discrete) and env.action_space.n == N_FLAT_ACTIONS == 12
     env.reset(seed=0)
-    _, _, _, _, info = env.step(5)  # = (2, 1): high-quality sensing + transmit
-    assert info["sensing_level"] == 2 and info["tx_attempted"]
-    assert np.array_equal(unflatten_action(5), [2, 1])
+    _, _, _, _, info = env.step(10)  # = (2, 2): high-quality sensing + transmit in the standard mode
+    assert info["sensing_level"] == 2 and info["tx_attempted"] and info["tx_mode"] == 1
+    assert np.array_equal(unflatten_action(10), [2, 2])
 
 
 def test_evaluate_and_summarize_shapes():
@@ -82,7 +82,7 @@ def test_frame_stacker_matches_vec_frame_stack():
     stacked = venv.reset()
     env = make_env("default")
     obs, _ = env.reset(seed=5)
-    fs = FrameStacker(4, 17)
+    fs = FrameStacker(4, 18)
     assert np.allclose(stacked[0], fs.push(obs))
     for k in range(20):
         a = np.array([[2, 1]]) if k % 3 == 0 else np.array([[0, 0]])
@@ -113,7 +113,7 @@ def test_stacked_policy_wraps_plain_policy():
     pol.reset()
     for _ in range(3):
         obs, *_ = env.step(pol.act(obs))
-    assert inner.dims == [51, 51, 51]
+    assert inner.dims == [54, 54, 54]
 
 
 def test_rule_based_v2_is_lazier_when_battery_is_low():
@@ -121,16 +121,46 @@ def test_rule_based_v2_is_lazier_when_battery_is_low():
 
     idx = {f.name: i for i, f in enumerate(OBSERVATION_FIELDS)}
     pol = ea.RuleBasedPolicy()
-    obs = np.zeros(17, dtype=np.float32)
+    obs = np.zeros(len(OBSERVATION_FIELDS), dtype=np.float32)
+    obs[idx["path_loss_est"]] = 1.0
     obs[idx["measurement_quality"]] = 0.8
     obs[idx["measurement"]] = obs[idx["reported_value"]] = 0.5
     obs[idx["measurement_age"]] = obs[idx["time_since_tx_success"]] = obs[idx["app_info_age"]] = 3.0 / 24  # 3 h
     obs[idx["link_quality"]] = 1.0
     obs[idx["battery_soc"]] = 0.8
-    assert np.array_equal(pol.act(obs), [2, 1])  # normal mode: 3 h > 2 h -> report
+    assert np.array_equal(pol.act(obs), [2, 2])  # normal mode: 3 h > 2 h -> report (standard radio mode)
     obs[idx["battery_soc"]] = 0.4
     assert np.array_equal(pol.act(obs), [0, 0])  # economy: interval is 4 h -> wait, and no checks
     obs[idx["battery_soc"]] = 0.1
     assert np.array_equal(pol.act(obs), [0, 0])  # deep economy: 8 h
     obs[idx["app_info_age"]] = 9.0 / 24
-    assert np.array_equal(pol.act(obs), [2, 1])  # ... but still a high-quality report when due
+    assert np.array_equal(pol.act(obs), [2, 2])  # ... but still a high-quality report when due
+
+
+def test_rule_based_picks_radio_mode_from_path_loss_estimate():
+    from edgeengine_aware.observation import OBSERVATION_FIELDS, NodeProfile
+
+    cfg = ea.default_config()
+    prof = NodeProfile.from_config(cfg)
+    idx = {f.name: i for i, f in enumerate(OBSERVATION_FIELDS)}
+    pol = ea.RuleBasedPolicy(profile=prof)
+    obs = np.zeros(len(OBSERVATION_FIELDS), dtype=np.float32)
+    obs[idx["measurement_quality"]] = 0.8
+    obs[idx["measurement"]] = obs[idx["reported_value"]] = 0.5
+    obs[idx["measurement_age"]] = obs[idx["time_since_tx_success"]] = obs[idx["app_info_age"]] = 3.0 / 24
+    obs[idx["link_quality"]] = 1.0
+    obs[idx["battery_soc"]] = 0.8
+    o = cfg.observation
+
+    def with_pl(pl_db):
+        obs[idx["path_loss_est"]] = (pl_db - o.path_loss_min_db) / (o.path_loss_max_db - o.path_loss_min_db)
+        return pol.act(obs)
+
+    obs[idx["path_loss_est"]] = 1.0  # no estimate -> reference (standard) mode
+    assert np.array_equal(pol.act(obs), [2, 2])
+    assert np.array_equal(with_pl(130.0), [2, 1])  # fast mode has +7 dB -> cheapest
+    assert np.array_equal(with_pl(139.0), [2, 2])  # fast -2 dB, standard +4 dB -> standard
+    assert np.array_equal(with_pl(146.0), [2, 3])  # only robust has >= 4 dB
+    assert np.array_equal(with_pl(160.0), [2, 3])  # nothing qualifies -> most robust
+    obs[idx["link_quality"]] = 0.5  # recent failures -> escalate one mode
+    assert np.array_equal(with_pl(130.0), [2, 2])

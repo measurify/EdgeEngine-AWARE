@@ -29,12 +29,13 @@ edgeengine_aware/
   interfaces.py      hardware abstraction protocols: Clock, EnergyStorage, EnergySource, Sensor, Radio,
                      RemoteApplication; Measurement / Packet records; Gymnasium-independent Policy protocol
   observation.py     NodeProfile (flash constants), NodeState (hardware-measurable state),
-                     NodeStateTracker (firmware bookkeeping), ObservationBuilder (the 17-vector)
-  actions.py         MultiDiscrete([3, 2]) encoding, flat index, shared energy-feasibility rule
+                     NodeStateTracker (firmware bookkeeping), ObservationBuilder (the 18-vector)
+  actions.py         MultiDiscrete([3, 1 + n_modes]) encoding (sensing level, transmit / radio mode), flat index,
+                     shared energy-feasibility rule
   energy.py          SimulatedClock, SimulatedEnergyStorage, SolarEnergySource (stochastic solar cycle)
   agriculture.py     FieldEnvironment: hidden ground truth (soil moisture, temperature, humidity, rain, irrigation)
   sensing.py         SimulatedSoilMoistureSensor (level-dependent noise)
-  communication.py   SimulatedLoRaRadio (energy per attempt, stochastic delivery, ACK)
+  communication.py   SimulatedLoRaRadio: selectable modes (SF/power), link-budget channel with slow and fast fading, ACK + margin
   application.py     RemoteMonitoringApplication: information utility, priority requests
   reward.py          RewardCalculator with separately reported components
   metrics.py         EpisodeMetrics (incl. Age of Information) and per-step EpisodeLog
@@ -43,7 +44,7 @@ edgeengine_aware/
   policies.py        RuleBasedPolicy, RandomPolicy, PeriodicPolicy, AlwaysOnPolicy, run_episode
   deployment.py      NodeController (firmware loop), mock hardware backend, PolicyBundle export
   scenarios.py       named benchmark scenarios (default, cloudy_week, tiny_battery, lossy_link, drought, demanding_application)
-  rl.py              RL helpers: FlatActionWrapper (Discrete(6)), MixedScenarioEnv, SB3Policy adapter, evaluation
+  rl.py              RL helpers: FlatActionWrapper (Discrete(12)), MixedScenarioEnv, SB3Policy adapter, evaluation
                      protocol, MLP export (SB3 -> lists), numpy-only runtime, FrameStacker / StackedPolicy
 examples/
   baseline_policy.ipynb   lecture notebook: environment tour, rule-based episode, metrics, comparisons
@@ -75,7 +76,7 @@ git clone <this repository> && cd edgeengine_aware
 python -m venv .venv && source .venv/bin/activate      # optional
 pip install -e ".[dev]"                                 # numpy, gymnasium, matplotlib, pytest, jupyter
 pip install -e ".[rl]"                                  # + stable-baselines3, sb3-contrib, torch (only for examples/train_rl.ipynb)
-pytest                                                  # 57 tests, ~7 s
+pytest                                                  # 60 tests, ~7 s
 ```
 
 ## Quick start
@@ -113,8 +114,8 @@ jupyter notebook examples/baseline_policy.ipynb
 
 | | |
 |---|---|
-| observation | `Box(0, 1, (17,), float32)` — battery SoC, harvest (now, recent), time of day (sin, cos), stored sample (value, quality, age), time since ACK, estimated information age at the application, reported value, application priority, node-side importance, link quality, energy costs (low, high, tx). See `docs/observation.md`. |
-| action | `MultiDiscrete([3, 2])` — (sensing level, transmit). See `docs/actions.md`. |
+| observation | `Box(0, 1, (18,), float32)` — battery SoC, harvest (now, recent), time of day (sin, cos), stored sample (value, quality, age), time since ACK, estimated information age at the application, reported value, application priority, node-side importance, link quality, path-loss estimate from the last ACK, energy costs (low, high, tx). See `docs/observation.md`. |
+| action | `MultiDiscrete([3, 4])` — (sensing level: off / low-cost / high-quality, transmit: off / fast / standard / robust radio mode). See `docs/actions.md`. |
 | step / episode | 15 min / 7 days = 672 steps (configurable); truncated at the horizon, optional termination on brown-out |
 | reward | tracking utility + packet bonus − sensing/communication energy − staleness (priority-weighted AoI) − battery risk − brown-out − rejected actions − wasted harvest; all components in `info["reward_components"]` |
 | metrics | harvested / consumed / baseline / sensing / communication / wasted energy; sensing, high-quality sensing, transmissions, deliveries; average & min SoC, low-battery fraction, depletion events; average & max AoI; total utility and reward |
@@ -123,7 +124,10 @@ jupyter notebook examples/baseline_policy.ipynb
 
 Default physical scale (all replaceable by device measurements): 300 J storage, 200 µW
 baseline, 5 mW-peak cell with 60 % converter efficiency (~55 J/day on an average day),
-0.10 J / 0.60 J per low / high-quality sample, 0.60 J per uplink with 90 % nominal delivery.
+0.10 J / 0.60 J per low / high-quality sample, three radio modes at 0.30 / 0.60 / 1.20 J per
+uplink (SF7 / SF9 / SF12-like) over a link-budget channel with slow fading — nominally the
+standard mode delivers ~90 %, the fast one only in favourable fading phases, the robust one
+almost always.
 Hourly high-quality reporting is sustainable on sunny days and not on cloudy ones — the
 regime where an energy-aware policy matters.
 
@@ -142,8 +146,8 @@ cfg.harvesting.max_power_w = 0.008
 cfg.harvesting.clearness_mean = 0.5       # cloudier climate
 cfg.sensing.energy_j = (0.0, 0.05, 0.4)
 cfg.sensing.noise_std = (0.0, 0.05, 0.005)
-cfg.communication.tx_energy_j = 0.9
-cfg.communication.base_success_prob = 0.8
+cfg.communication.path_loss_mean_db = 145.0    # node farther from the gateway
+cfg.communication.modes = ea.config.single_mode_radio(energy_j=0.9).modes   # or a binary transmit action
 cfg.communication.priority_update_mode = "on_uplink"   # LoRaWAN class-A style downlink
 cfg.agriculture.warning_threshold, cfg.agriculture.critical_threshold = 0.40, 0.30
 cfg.agriculture.rain_events_per_day = 0.5
@@ -158,7 +162,7 @@ Six tiny protocols (`Clock`, `EnergyStorage`, `EnergySource`, `Sensor`, `Radio`,
 `RemoteApplication`) separate the node's decision logic from whatever produces its readings.
 `NodeStateTracker` + `ObservationBuilder` + `plan_execution` are shared between the simulator
 (`env.py`) and the firmware-style loop (`deployment.NodeController`); a policy only ever sees
-the 17-vector and only ever emits `(sense, tx)`. `deployment.PolicyBundle` exports the full
+the 18-vector and only ever emits `(sense, tx / mode)`. `deployment.PolicyBundle` exports the full
 contract (observation order and normalisation constants, action encoding, model parameters,
 metadata) so that the same preprocessing runs on the device. Domain randomisation of the
 physical parameters is one switch away. Details: `docs/sim_to_real.md`, `docs/deployment.md`.
@@ -166,7 +170,7 @@ physical parameters is one switch away. Details: `docs/sim_to_real.md`, `docs/de
 ## Training and comparing policies
 
 The environment follows the Gymnasium API and works unchanged with Stable-Baselines3
-(`PPO`/`A2C` accept `MultiDiscrete`; `rl.FlatActionWrapper` exposes `Discrete(6)` for DQN).
+(`PPO`/`A2C` accept `MultiDiscrete`; `rl.FlatActionWrapper` exposes `Discrete(12)` for DQN).
 `examples/train_rl.ipynb` is the reference protocol: it trains PPO and DQN on a mixture of the
 six scenarios of `scenarios.py` with domain randomisation, compares them with the baselines on
 held-out seeds, analyses the learned behaviour, exports the actor as a `PolicyBundle` whose
@@ -192,8 +196,9 @@ the notebook is the experiment.
 
 The architecture leaves room, without redesign, for: multiple sensors (more `Sensor`
 objects and observation components), multiple application requirements (several
-`RemoteApplication` priorities), adaptive radio power / spreading factor / payload size
-(extra `MultiDiscrete` columns handled in `plan_execution` and `Radio`), data compression and
+`RemoteApplication` priorities), more radio modes or payload-size decisions (entries in
+`CommunicationConfig.modes`, or extra `MultiDiscrete` columns handled in `plan_execution` and
+`Radio`), data compression and
 edge inference / TinyML / local event detection (actions with an energy cost and an effect on
 the packet), multiple nodes (a vector env of `EdgeEngineAwareEnv` or a shared channel object),
 other harvesting technologies (another `EnergySource`), battery ageing (inside

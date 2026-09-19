@@ -60,7 +60,7 @@ def test_domain_randomisation_changes_physical_parameters_but_not_spaces():
     env.reset(seed=2)
     p2 = (env.cfg.storage.capacity_j, env.cfg.communication.tx_energy_j, env.cfg.sensing.noise_std)
     assert p1 != p2
-    assert env.observation_space.shape == (17,)
+    assert env.observation_space.shape == (18,)
     # the base configuration is untouched
     assert env.base_config.storage.capacity_j == 300.0
     # randomised costs are what the node reports in its observation

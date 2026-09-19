@@ -7,10 +7,10 @@ A policy is only meaningful together with the pre- and post-processing it was tr
 
 | field | content | why it matters |
 |---|---|---|
-| `observation_names` | the 17 names **in order** | the index of each input to the network / rule |
+| `observation_names` | the 18 names **in order** | the index of each input to the network / rule |
 | `observation_normalisation` | the formula of each component | how raw readings become inputs |
-| `profile` | `NodeProfile`: sensing energies, tx energy, thresholds, timestep, baseline power, brown-out reserve, ACK availability, `harvest_ref_power_w`, `age_scale_s`, EWMA α's, `importance_scale` | every constant the firmware needs to reproduce `ObservationBuilder` and `plan_execution` |
-| `action_encoding` | `nvec = [3, 2]`, `flat = sense*2 + tx`, semantics of each value | how the output becomes `sensor_read(mode)` / `radio_send()` |
+| `profile` | `NodeProfile`: sensing energies, per-mode radio energies / transmit powers / sensitivities, reference mode, thresholds, timestep, baseline power, brown-out reserve, ACK availability, `harvest_ref_power_w`, `age_scale_s`, EWMA α's, `importance_scale`, path-loss range | every constant the firmware needs to reproduce `ObservationBuilder` (incl. the path-loss estimate) and `plan_execution` |
+| `action_encoding` | `nvec = [3, 1 + n_modes]`, `flat = sense*(1+n_modes) + tx`, semantics of each value | how the output becomes `sensor_read(level)` / `radio_send(mode)` |
 | `model` | thresholds (rule-based), weights/biases/activations (MLP), table (tabular) | the decision function itself |
 | `metadata` | package version, export time, policy class, notes | traceability |
 
@@ -27,12 +27,13 @@ constants.
 
 ## Dimensionality
 
-* Input: **17 floats** in `[0, 1]` (fits fixed-point `q15`/`uint8` quantisation without
+* Input: **18 floats** in `[0, 1]` (fits fixed-point `q15`/`uint8` quantisation without
   rescaling).
-* Output: **6 discrete actions** (or two heads of 3 and 2 logits).
-* Rule-based baseline: ~15 comparisons, no multiplications.
-* A 17→32→32→6 MLP: ~1.8 k parameters, ~1.8 k MACs per decision — negligible on any Cortex-M
-  at one decision per 15 minutes.
+* Output: **12 discrete actions** (or two heads of 3 and 4 logits).
+* Rule-based baseline: ~20 comparisons and a three-entry table lookup, no multiplications
+  beyond the path-loss conversion.
+* A 18→64→64→7 MLP (the notebook's PPO actor): ~5.7 k parameters, ~5.7 k MACs per decision —
+  negligible on any Cortex-M at one decision per 15 minutes.
 
 ## Firmware main loop (mirrors `deployment.NodeController`)
 
@@ -44,7 +45,7 @@ void decision_cycle(void) {
     s.harvest_power_w = harvester_read_avg_power_w();   // energy integrated since last wake-up / dt
     tracker_begin_step(&tracker, &s, downlink_last_priority());
 
-    float obs[17];
+    float obs[18];
     observation_build(&tracker, &profile, obs);         // == ObservationBuilder.build
 
     uint8_t sense, tx;
@@ -53,7 +54,8 @@ void decision_cycle(void) {
     plan_t plan = plan_execution(sense, tx, s.stored_energy_j, BASELINE_J, RESERVE_J,
                                  profile.sense_energy_j, profile.tx_energy_j, tracker.has_measurement);
     if (plan.sense) { measurement_t m = sensor_read(plan.sense_level); tracker_on_measurement(&tracker, &m); }
-    if (plan.tx)    { bool ack = lora_send_confirmed(&tracker.measurement);  tracker_on_transmission(&tracker, ack); }
+    if (plan.tx)    { tx_result_t r = lora_send_confirmed(&tracker.measurement, plan.mode);   // sets SF/power
+                      tracker_on_transmission(&tracker, r.acked, plan.mode, r.margin_db); }  // updates the path-loss estimate
 
     sleep_until_next_slot(TIMESTEP_S);
 }
@@ -61,7 +63,7 @@ void decision_cycle(void) {
 
 Every function on the left has a Python twin in `observation.py` / `actions.py`; porting is a
 line-by-line translation plus unit tests that feed the same `NodeState` to both and compare
-the 17 outputs bit-for-bit (after float32 rounding).
+the 18 outputs bit-for-bit (after float32 rounding).
 
 ## Deployment options for the decision function
 
@@ -112,8 +114,8 @@ plus the bundle, and nothing else in the package needs to change when it is adde
 | rule-based baseline | `RuleBasedPolicy` | implemented; interpretable reference and safety fallback |
 | random / periodic | `RandomPolicy`, `PeriodicPolicy` | implemented; sanity floor and duty-cycle reference |
 | PPO / A2C (actor-critic) | SB3 `MlpPolicy` on the native `MultiDiscrete` space; `rl.SB3Policy` adapts the model to the `Policy` protocol | trained and evaluated in the notebook |
-| DQN family | `rl.FlatActionWrapper` → `Discrete(6)` | trained and evaluated in the notebook |
-| tabular (Q-learning / SARSA) | bin the 17 inputs with a `gym.ObservationWrapper`, use `flatten_action` | not implemented; a teaching exercise |
+| DQN family | `rl.FlatActionWrapper` → `Discrete(12)` | trained and evaluated in the notebook |
+| tabular (Q-learning / SARSA) | bin the 18 inputs with a `gym.ObservationWrapper`, use `flatten_action` | not implemented; a teaching exercise |
 | frame-stacked / recurrent policies | `VecFrameStack` (mirrored on the node by `rl.FrameStacker` / `rl.StackedPolicy`) or `RecurrentPPO` (sb3-contrib) | trained and evaluated in the notebook (section 9); `examples/train_seeds.py --algo ppo_stack|rppo` |
 | **multi-seed protocol** | `examples/train_seeds.py --algo <ppo|dqn|ppo_stack|rppo> --seed N` → JSON with evaluation rows and learning curve; the notebook aggregates mean ± std across runs | section 8 of the notebook |
 | **evaluation protocol** | `rl.evaluate(policies, scenarios, seeds)` → one `EvalRow` per episode; `rl.summarize` for mean ± std | six scenarios (`scenarios.SCENARIOS`), held-out seeds ≥ 1000, deterministic policies, nominal (non-randomised) physics |
