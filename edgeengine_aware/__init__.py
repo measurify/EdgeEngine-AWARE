@@ -38,6 +38,7 @@ from .interfaces import Policy
 from .metrics import EpisodeMetrics
 from .observation import OBSERVATION_FIELDS, NodeProfile, NodeState, ObservationBuilder
 from .policies import AlwaysOnPolicy, PeriodicPolicy, RandomPolicy, RuleBasedParams, RuleBasedPolicy, run_episode
+from .scenarios import SCENARIOS, get_scenario
 
 register(
     id="EdgeEngineAware-v0",
@@ -68,6 +69,8 @@ __all__ = [
     "PeriodicPolicy",
     "AlwaysOnPolicy",
     "run_episode",
+    "SCENARIOS",
+    "get_scenario",
     "EpisodeMetrics",
     "ObservationBuilder",
     "OBSERVATION_FIELDS",

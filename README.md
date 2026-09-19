@@ -42,15 +42,20 @@ edgeengine_aware/
   rendering.py       Matplotlib dashboard (human / rgb_array) and text dashboard (ansi)
   policies.py        RuleBasedPolicy, RandomPolicy, PeriodicPolicy, AlwaysOnPolicy, run_episode
   deployment.py      NodeController (firmware loop), mock hardware backend, PolicyBundle export
+  scenarios.py       named benchmark scenarios (default, cloudy_week, tiny_battery, lossy_link, drought, demanding_application)
+  rl.py              RL helpers: FlatActionWrapper (Discrete(6)), SB3Policy adapter, evaluation protocol,
+                     MLP export (SB3 -> lists) and a numpy-only runtime for exported policies
 examples/
   baseline_policy.ipynb   lecture notebook: environment tour, rule-based episode, metrics, comparisons
-  build_notebook.py       regenerates the notebook
+  train_rl.ipynb          training PPO and DQN, learning curves, full scenario comparison, behaviour analysis, export
+  build_notebook.py / build_rl_notebook.py   regenerate the notebooks
   compare_policies.py     headless comparison of the baselines
 tests/
   test_env.py             Gymnasium API, spaces, truncation, rejection, leakage, rendering
   test_energy.py          bounds, conservation, units, solar model
   test_reproducibility.py seeding, domain randomisation
   test_deployment.py      protocols, mock backend, shared observation builder, export
+  test_rl.py              scenarios, wrappers, evaluation protocol, numpy MLP runtime
 docs/
   observation.md   every observation component, its normalisation and hardware source; Markov discussion
   actions.md       action encoding and feasibility rule
@@ -67,7 +72,8 @@ Python ≥ 3.11.
 git clone <this repository> && cd edgeengine_aware
 python -m venv .venv && source .venv/bin/activate      # optional
 pip install -e ".[dev]"                                 # numpy, gymnasium, matplotlib, pytest, jupyter
-pytest                                                  # 48 tests, ~3 s
+pip install -e ".[rl]"                                  # + stable-baselines3, torch (only for examples/train_rl.ipynb)
+pytest                                                  # 54 tests, ~7 s
 ```
 
 ## Quick start
@@ -155,24 +161,29 @@ contract (observation order and normalisation constants, action encoding, model 
 metadata) so that the same preprocessing runs on the device. Domain randomisation of the
 physical parameters is one switch away. Details: `docs/sim_to_real.md`, `docs/deployment.md`.
 
-## Using it with RL libraries
+## Training and comparing policies
 
 The environment follows the Gymnasium API and works unchanged with Stable-Baselines3
-(`PPO`/`A2C` accept `MultiDiscrete`). For DQN-like agents wrap the action space:
+(`PPO`/`A2C` accept `MultiDiscrete`; `rl.FlatActionWrapper` exposes `Discrete(6)` for DQN).
+`examples/train_rl.ipynb` is the reference protocol: it trains PPO and DQN with domain
+randomisation, compares them with the baselines on the six scenarios of `scenarios.py` over
+held-out seeds, analyses the learned behaviour and exports the actor as a `PolicyBundle`
+whose numpy-only runtime (`rl.NumpyMLPPolicy`) reproduces the SB3 actions exactly.
 
 ```python
-import gymnasium as gym
-from gymnasium import spaces
-from edgeengine_aware.actions import unflatten_action, N_FLAT_ACTIONS
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv
+from edgeengine_aware.rl import make_env_fn, SB3Policy, evaluate, summarize
+from edgeengine_aware.scenarios import SCENARIOS
 
-class FlatActions(gym.ActionWrapper):
-    def __init__(self, env):
-        super().__init__(env); self.action_space = spaces.Discrete(N_FLAT_ACTIONS)
-    def action(self, a):
-        return unflatten_action(int(a))
+model = PPO("MlpPolicy", DummyVecEnv([make_env_fn("default", randomize=True, seed=i) for i in range(8)]),
+            policy_kwargs=dict(net_arch=[64, 64]), device="cpu").learn(2_000_000)
+rows = evaluate({"PPO": lambda: SB3Policy(model), "rule-based": ea.RuleBasedPolicy}, SCENARIOS, seeds=range(1000, 1020))
+print(summarize(rows, "reward"))
 ```
 
-No RL algorithm is implemented here on purpose: the package is the benchmark, not the agent.
+No RL algorithm is implemented inside the package on purpose: the package is the benchmark,
+the notebook is the experiment.
 
 ## Extensibility
 

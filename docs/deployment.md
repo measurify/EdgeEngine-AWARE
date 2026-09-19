@@ -102,22 +102,18 @@ plus the bundle, and nothing else in the package needs to change when it is adde
 7. **Close the loop**: feed the recorded harvesting, sensor and channel traces back into the
    simulator (trace-driven backends) to re-tune the models and re-train.
 
-## Comparing policies in EdgeEngine AWARE (future work, not implemented)
+## Comparing policies in EdgeEngine AWARE
 
-| method | how it plugs in | notes |
+`examples/train_rl.ipynb` implements the protocol; `edgeengine_aware.rl` and
+`edgeengine_aware.scenarios` hold the reusable parts.
+
+| method | how it plugs in | status |
 |---|---|---|
-| rule-based baseline | `RuleBasedPolicy` | interpretable reference; also the safety fallback |
-| random | `RandomPolicy` | sanity floor |
-| tabular (Q-learning / SARSA) | discretise the 17 inputs into a few bins each (e.g. SoC × harvest × age × priority × importance) and use `flatten_action` | needs a `gym.ObservationWrapper` that bins; illustrates the curse of dimensionality |
-| DQN family | `spaces.Discrete(6)` via a `gym.ActionWrapper` around `unflatten_action` | discrete actions fit naturally |
-| PPO / A2C (actor-critic) | Stable-Baselines3 supports `MultiDiscrete` directly (`MlpPolicy`) | recommended first RL baseline; add frame stacking or an LSTM policy for the POMDP |
-| evaluation protocol | fixed seed sets, `EpisodeMetrics` + reward, stress configs, randomisation on/off | report mean ± std over ≥ 20 seeds |
-
-A minimal SB3 script (not included in the package to keep dependencies light):
-
-```python
-import gymnasium as gym, edgeengine_aware
-from stable_baselines3 import PPO
-env = gym.make("EdgeEngineAware-v0")
-model = PPO("MlpPolicy", env, gamma=0.99, n_steps=2048, verbose=1).learn(2_000_000)
-```
+| rule-based baseline | `RuleBasedPolicy` | implemented; interpretable reference and safety fallback |
+| random / periodic | `RandomPolicy`, `PeriodicPolicy` | implemented; sanity floor and duty-cycle reference |
+| PPO / A2C (actor-critic) | SB3 `MlpPolicy` on the native `MultiDiscrete` space; `rl.SB3Policy` adapts the model to the `Policy` protocol | trained and evaluated in the notebook |
+| DQN family | `rl.FlatActionWrapper` → `Discrete(6)` | trained and evaluated in the notebook |
+| tabular (Q-learning / SARSA) | bin the 17 inputs with a `gym.ObservationWrapper`, use `flatten_action` | not implemented; a teaching exercise |
+| recurrent / frame-stacked policies | `VecFrameStack` or `RecurrentPPO` (sb3-contrib) around the same env | not implemented; the natural next step for the POMDP |
+| **evaluation protocol** | `rl.evaluate(policies, scenarios, seeds)` → one `EvalRow` per episode; `rl.summarize` for mean ± std | six scenarios (`scenarios.SCENARIOS`), held-out seeds ≥ 1000, deterministic policies, nominal (non-randomised) physics |
+| **export check** | `rl.export_sb3_mlp` → `PolicyBundle.model`; `rl.NumpyMLPPolicy` re-executes it with numpy and must reproduce every SB3 action | part of the notebook and of `tests/test_rl.py` |
