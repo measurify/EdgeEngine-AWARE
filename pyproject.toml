@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edgeengine-aware"
+version = "0.1.0"
+description = "EdgeEngine AWARE: application- and energy-aware simulation environment for reinforcement learning in energy-harvesting Edge IoT systems."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Riccardo Berta", email = "riccardo.berta@unige.it" }]
+keywords = ["reinforcement-learning", "gymnasium", "iot", "edge", "energy-harvesting", "tinyml", "smart-agriculture"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["numpy>=1.24", "gymnasium>=0.29", "matplotlib>=3.7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "jupyter", "nbformat", "nbconvert"]
+rl = ["stable-baselines3>=2.0", "torch"]
+
+[tool.setuptools.packages.find]
+include = ["edgeengine_aware*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

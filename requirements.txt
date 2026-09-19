@@ -1,0 +1,10 @@
+# EdgeEngine AWARE - runtime dependencies (Python >= 3.11)
+numpy>=1.24
+gymnasium>=0.29
+matplotlib>=3.7
+
+# development / examples
+pytest>=7.0
+jupyter
+nbformat
+nbconvert
