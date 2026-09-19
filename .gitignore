@@ -12,3 +12,6 @@ examples/rl_runs/
 
 # Cowork session scratch
 Claude outputs/
+
+# generated from a PolicyBundle by tools/export_c.py
+firmware/eea_policy_data.h

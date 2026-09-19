@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "edgeengine-aware"
-version = "0.2.0"
+version = "0.3.0"
 description = "EdgeEngine AWARE: application- and energy-aware simulation environment for reinforcement learning in energy-harvesting Edge IoT systems."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -9,7 +9,7 @@ the caller, so the core package stays dependency-light.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 import gymnasium as gym
 import numpy as np
@@ -168,16 +168,23 @@ def evaluate(
     *,
     randomize: bool = False,
     progress: Callable[[str], None] | None = None,
+    envs: Mapping[str, gym.Env] | None = None,
 ) -> list[EvalRow]:
     """Run every policy on every scenario and seed; return one row per episode.
 
     Policies are given as factories so that stateful policies start fresh.
     Seeds default to a held-out range (1000+) that training never touches.
+    ``envs`` replaces the named scenarios by ready-made environments
+    (``{label: env}``), e.g. trace-driven ones; the label is reported as the
+    row's ``scenario``.
     """
     rows: list[EvalRow] = []
     seeds = list(seeds)
-    for scenario in scenarios:
-        env = make_env(scenario, randomize=randomize)
+    if envs is not None:
+        targets: list[tuple[str, gym.Env, bool]] = [(k, v, False) for k, v in envs.items()]
+    else:
+        targets = [(str(s), make_env(s, randomize=randomize), True) for s in scenarios]
+    for scenario, env, owned in targets:
         for name, factory in policies.items():
             if progress:
                 progress(f"{scenario:22s} {name}")
@@ -205,7 +212,8 @@ def evaluate(
                         components=dict(m.reward_components),
                     )
                 )
-        env.close()
+        if owned:
+            env.close()
     return rows
 
 

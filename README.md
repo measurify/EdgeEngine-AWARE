@@ -46,12 +46,24 @@ edgeengine_aware/
   scenarios.py       named benchmark scenarios (default, cloudy_week, tiny_battery, lossy_link, drought, demanding_application)
   rl.py              RL helpers: FlatActionWrapper (Discrete(12)), MixedScenarioEnv, SB3Policy adapter, evaluation
                      protocol, MLP export (SB3 -> lists), numpy-only runtime, FrameStacker / StackedPolicy
+  traces.py          trace-driven backends: Trace (CSV loader, interval semantics), TraceSolarEnergySource,
+                     TraceFieldEnvironment, TraceDrivenEnv (replays recorded weather / soil data)
+firmware/
+  eea_node.h / .c    C99 port of the node-side contract: tracker, observation builder, feasibility rule,
+                     rule-based policy, MLP forward pass (bit-exact with Python, see tests/test_firmware.py)
+  main_example.c     decision-loop skeleton with HAL stubs;  test/eea_harness.c  stdin-driven test harness
+tools/
+  export_c.py        PolicyBundle JSON -> eea_policy_data.h (profile constants, rule thresholds or weights)
+  fetch_open_meteo.py download an hourly ERA5 / ERA5-Land trace (Open-Meteo archive) in the trace CSV format
+  make_demo_trace.py  generate the synthetic demo trace shipped in data/traces/
+data/traces/         demo_liguria_2023_hourly.csv (synthetic stand-in; real data via tools/fetch_open_meteo.py)
 examples/
   baseline_policy.ipynb   lecture notebook: environment tour, rule-based episode, metrics, comparisons
   train_rl.ipynb          training PPO and DQN, learning curves, full scenario comparison, behaviour analysis, export,
                           multi-seed robustness study, memory (frame stacking / recurrent PPO)
   train_seeds.py          train + evaluate one (algorithm, seed) pair; the notebook launches and aggregates these runs
-  build_notebook.py / build_rl_notebook.py   regenerate the notebooks
+  trace_driven.ipynb      the simulator on recorded traces: seasons, model-vs-trace statistics, policies per season
+  build_notebook.py / build_rl_notebook.py / build_trace_notebook.py   regenerate the notebooks
   compare_policies.py     headless comparison of the baselines
 tests/
   test_env.py             Gymnasium API, spaces, truncation, rejection, leakage, rendering
@@ -59,6 +71,8 @@ tests/
   test_reproducibility.py seeding, domain randomisation
   test_deployment.py      protocols, mock backend, shared observation builder, export
   test_rl.py              scenarios, wrappers, evaluation protocol, numpy MLP runtime
+  test_traces.py          trace loader semantics, trace-driven backends and environment
+  test_firmware.py        C runtime vs Python reference (compiles firmware/ with cc; skipped without a compiler)
 docs/
   observation.md   every observation component, its normalisation and hardware source; Markov discussion
   actions.md       action encoding and feasibility rule
@@ -192,6 +206,35 @@ print(summarize(rows, "reward"))
 No RL algorithm is implemented inside the package on purpose: the package is the benchmark,
 the notebook is the experiment.
 
+## Recorded traces instead of models
+
+`edgeengine_aware.traces` replays recorded hourly weather and soil data through the same
+environment: `TraceSolarEnergySource` turns global irradiance into panel power,
+`TraceFieldEnvironment` replays soil moisture / temperature / humidity / rain as the hidden
+ground truth, and `TraceDrivenEnv` picks a (random or fixed) window of the trace at every
+`reset()`. Spaces, observation contract and reward are unchanged, so a policy trained on the
+stochastic models can be evaluated on data they never produced — the first sim-to-real check.
+
+```python
+from edgeengine_aware.traces import Trace, TraceDrivenEnv
+trace = Trace.from_csv("data/traces/demo_liguria_2023_hourly.csv")   # or albenga_2023_hourly.csv from Open-Meteo
+env = TraceDrivenEnv(trace.slice_days(151, 92), default_config())      # summer windows only
+```
+
+The repository ships a clearly labelled **synthetic** demo trace; `tools/fetch_open_meteo.py`
+downloads the real ERA5-Land reanalysis for any site (CC BY 4.0). `examples/trace_driven.ipynb`
+compares the trace statistics with the synthetic scenarios and evaluates the baselines and the
+exported PPO policy season by season.
+
+## Firmware port
+
+`firmware/eea_node.c` is a dependency-free C99 translation of everything the node runs:
+`NodeStateTracker`, `ObservationBuilder`, `plan_execution`, `RuleBasedPolicy` and the MLP
+forward pass (about 4 kB of code at `-Os`). `tools/export_c.py` turns a `PolicyBundle` into
+`eea_policy_data.h` (profile constants + thresholds or weights); `tests/test_firmware.py`
+compiles the runtime and checks, event by event against the Python reference, that
+observations are **bit-exact** (float32) and that every action agrees.
+
 ## Extensibility
 
 The architecture leaves room, without redesign, for: multiple sensors (more `Sensor`
@@ -202,9 +245,10 @@ objects and observation components), multiple application requirements (several
 edge inference / TinyML / local event detection (actions with an energy cost and an effect on
 the packet), multiple nodes (a vector env of `EdgeEngineAwareEnv` or a shared channel object),
 other harvesting technologies (another `EnergySource`), battery ageing (inside
-`SimulatedEnergyStorage`), explicit network congestion (inside `SimulatedLoRaRadio`), real
-sensor / harvesting traces (trace-driven `Sensor` / `EnergySource`), hardware-in-the-loop
-(`NodeController` with serial drivers) and embedded deployment (`PolicyBundle` → firmware).
+`SimulatedEnergyStorage`), explicit network congestion (inside `SimulatedLoRaRadio`), recorded
+channel traces (a trace-driven `Radio` next to the trace-driven source and field of
+`traces.py`), hardware-in-the-loop (`NodeController` with serial drivers, or the C runtime in
+`firmware/` on the board itself).
 
 ## Citation
 

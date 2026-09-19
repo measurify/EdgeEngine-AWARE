@@ -61,9 +61,24 @@ void decision_cycle(void) {
 }
 ```
 
-Every function on the left has a Python twin in `observation.py` / `actions.py`; porting is a
-line-by-line translation plus unit tests that feed the same `NodeState` to both and compare
-the 18 outputs bit-for-bit (after float32 rounding).
+Every function on the left has a Python twin in `observation.py` / `actions.py` — and now a C
+twin in `firmware/eea_node.c` (see below); `tests/test_firmware.py` feeds the same events to
+both and compares the 18 outputs bit-for-bit (after float32 rounding) and every action.
+
+## The C runtime (`firmware/`)
+
+| file | content |
+|---|---|
+| `eea_node.h` / `eea_node.c` | `eea_tracker_*` (= `NodeStateTracker`), `eea_observation_build` (= `ObservationBuilder.build`, float32 output), `eea_plan_execution[_profile]` (= `plan_execution`), `eea_rule_based_act` (= `RuleBasedPolicy.act`, incl. the radio-mode choice), `eea_mlp_forward` / `eea_mlp_act` (= `NumpyMLPPolicy`). C99, `<math.h>` only, no allocation; ~4 kB of code at `-Os` on x86-64, less on Cortex-M. |
+| `eea_policy_data.h` | **generated** by `tools/export_c.py <bundle.json>`: `EEA_PROFILE` (all `NodeProfile` constants), and `EEA_RULE_PARAMS` *or* `EEA_MLP` + weight arrays (`float`, ~23 kB for the 18→64→64→7 PPO actor), plus `EEA_BUNDLE_*` metadata strings the firmware can log or check. |
+| `main_example.c` | the decision loop above with HAL stubs — compiles on the host and prints a few cycles. |
+| `test/eea_harness.c` | stdin-driven harness used by the equivalence tests (not firmware). |
+
+Numerics: the tracker and the observation use `double` like the Python reference and round to
+`float` at the end exactly as numpy does, so observations are bit-exact; the MLP uses `float`
+accumulation like numpy's float32 matmul (logits agree to ~1e-6, actions agree except at
+numerical ties, which the test tolerates). `EEA_REAL` can be redefined to `float` for
+FPU-only-single targets, at the price of last-bit differences in the observation.
 
 ## Deployment options for the decision function
 
@@ -71,12 +86,12 @@ the 18 outputs bit-for-bit (after float32 rounding).
 |---|---|---|
 | **rule-based** (`RuleBasedPolicy`) | translate `act()` to C; thresholds from `bundle.model` | baseline, safety fallback, first field test |
 | **tabular** (Q-table over a discretised observation) | store the table (6 × #bins) in flash; same binning code as in Python | teaching, tiny MCUs |
-| **small MLP** (PPO / DQN actor) | export weights as lists → generate a C array; run with CMSIS-NN, a hand-written dense loop, or **TensorFlow Lite for Microcontrollers** after converting the network (Keras/ONNX → TFLite, int8 quantisation with the observation range `[0,1]` as calibration) | production |
+| **small MLP** (PPO / DQN actor) | `tools/export_c.py` → `eea_policy_data.h` + the dense loop of `eea_mlp_forward` (tested bit-for-bit against `rl.NumpyMLPPolicy`); alternatively CMSIS-NN or **TensorFlow Lite for Microcontrollers** after converting the network (Keras/ONNX → TFLite, int8 quantisation with the observation range `[0,1]` as calibration) | production |
 | **ONNX-derived** | ONNX → `onnx2c` / STM32Cube.AI / Edge Impulse | vendor toolchains |
 | **quantised NN** | post-training int8 quantisation is safe here: inputs are already in `[0,1]`, outputs are argmax'ed logits | when RAM/flash are tight |
 
-The runtime is not part of this project yet; the boundary is `Policy.act(obs) -> action`
-plus the bundle, and nothing else in the package needs to change when it is added.
+The C runtime covers the rule-based and MLP rows; the boundary for anything else is
+`Policy.act(obs) -> action` plus the bundle.
 
 ## Field-evaluation workflow
 
@@ -102,7 +117,9 @@ plus the bundle, and nothing else in the package needs to change when it is adde
      node* sampling at high rate; compute `u_track` offline from the reference trace and the
      application's belief timeline, exactly as `RemoteMonitoringApplication.tracking` does.
 7. **Close the loop**: feed the recorded harvesting, sensor and channel traces back into the
-   simulator (trace-driven backends) to re-tune the models and re-train.
+   simulator (`edgeengine_aware.traces`, see `examples/trace_driven.ipynb`) to re-tune the
+   models and re-train. Before any field data exists, public reanalysis traces
+   (`tools/fetch_open_meteo.py`) already give a season-by-season check of the transfer.
 
 ## Comparing policies in EdgeEngine AWARE
 

@@ -88,13 +88,17 @@ env = ea.EdgeEngineAwareEnv(cfg)
 
 ## Extending the backends
 
-* A **trace-driven backend** (real harvesting or sensor logs) is a class reading from a table
-  indexed by time. For the *deployment* loop it only needs the protocol (`measured_power_w()`,
-  `read(level, now)`). For the *Gymnasium environment* it must also expose what the simulator
-  needs from its world models (`update(t)`, `harvested_energy_j()`, `true_power_w()` for the
-  source; the true value callable for the sensor); plug it in by subclassing
-  `EdgeEngineAwareEnv` and overriding `_build_subsystems` (the subsystems are rebuilt at every
-  `reset()`, so assigning `env.source` after construction is not enough).
+* **Trace-driven backends** exist in `edgeengine_aware.traces`: `TraceSolarEnergySource`
+  (irradiance → panel power) and `TraceFieldEnvironment` (soil moisture, temperature, humidity,
+  rain) replay a `Trace` loaded from CSV; `TraceDrivenEnv` subclasses `EdgeEngineAwareEnv` and
+  overrides `_build_subsystems` (the subsystems are rebuilt at every `reset()`, so assigning
+  `env.source` after construction is not enough) and draws the replayed window in `reset()`.
+  The same pattern adds a trace-driven `Radio` (recorded RSSI/SNR) or a trace-driven `Sensor`
+  for the *deployment* loop, which only needs the protocol (`measured_power_w()`,
+  `read(level, now)`). Two conventions matter when loading archives: irradiance and rain are
+  *means/sums over the preceding interval* (piecewise constant), state variables are *instant*
+  (interpolated); and timestamps must be in local standard time so that the simulator's clock
+  and the sun agree.
 * **Hardware-in-the-loop** is `NodeController` with drivers that talk to a board over serial —
   the controller already runs one decision cycle per call and leaves sleeping to the caller.
 * **Multiple nodes / sensors / applications** are lists of the corresponding objects; the
