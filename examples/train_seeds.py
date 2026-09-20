@@ -5,10 +5,13 @@
     python examples/train_seeds.py --algo dqn --seed 1 --steps 500000
     python examples/train_seeds.py --algo rppo --seed 0             # RecurrentPPO (needs sb3-contrib)
 
-Every run writes ``examples/rl_runs/seeds/<algo>_seed<N>.json`` (evaluation rows,
-learning curve, metadata) and the best checkpoint next to it. The notebook
-``examples/train_rl.ipynb`` launches the missing runs and aggregates the JSON
-files, so this script is also what you call to add seeds or algorithms later.
+Every run writes ``<out>/<algo>_seed<N>.json`` (evaluation rows, learning curve,
+metadata), the best and last checkpoints in ``<out>/<algo>_seed<N>/`` and, for
+PPO and DQN, the exported ``PolicyBundle`` ``<out>/<algo>_seed<N>_bundle.json``
+(``--out`` defaults to ``examples/rl_runs/seeds``; the notebook uses
+``seeds_<budget>``). ``examples/train_rl.ipynb`` launches the missing runs and
+aggregates the JSON files, so this script is also what you call to add seeds or
+algorithms later; ``examples/run_long_training.sh`` chains several runs.
 """
 
 from __future__ import annotations
@@ -31,7 +34,8 @@ from stable_baselines3.common.monitor import Monitor  # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack  # noqa: E402
 
 import edgeengine_aware as ea  # noqa: E402
-from edgeengine_aware.rl import SB3Policy, StackedPolicy, evaluate, make_env, make_env_fn  # noqa: E402
+from edgeengine_aware.deployment import export_policy  # noqa: E402
+from edgeengine_aware.rl import SB3Policy, StackedPolicy, evaluate, export_sb3_mlp, make_env, make_env_fn  # noqa: E402
 from edgeengine_aware.scenarios import SCENARIOS  # noqa: E402
 
 ALGOS = ("ppo", "dqn", "ppo_stack", "rppo")
@@ -116,6 +120,11 @@ def main() -> None:
         "package_version": ea.__version__,
     }
     (args.out / f"{tag}.json").write_text(json.dumps(result))
+    if args.algo in ("ppo", "dqn"):  # frozen contract + weights, ready for tools/export_c.py
+        profile = ea.NodeProfile.from_config(ea.default_config())
+        bundle = export_policy(policy_factory(best)(), profile, policy_type="mlp", model=export_sb3_mlp(best),
+                               notes=f"{args.algo.upper()} {args.steps:,} steps, seed {args.seed}, mixture of scenarios, domain randomisation on")
+        bundle.save(args.out / f"{tag}_bundle.json")
     by_scen = {}
     for r in rows:
         by_scen.setdefault(r.scenario, []).append(r.reward)
