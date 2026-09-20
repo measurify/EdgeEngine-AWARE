@@ -18,8 +18,9 @@
  * -----------
  * * All physical quantities are double, exactly like the Python reference
  *   (the observation is rounded to float32 at the very end, as numpy does).
- *   On a Cortex-M4F you may switch EEA_REAL to float; the tests then compare
- *   with a tolerance instead of bit-exactly.
+ *   On a single-precision target you may define EEA_REAL as float; the
+ *   observation may then differ from Python in the last bit (that build is
+ *   not covered by the equivalence tests).
  * * No dynamic allocation, no I/O, no dependency beyond <math.h>.
  * * Radio modes are indexed 0..n_modes-1; the "transmit" action value is
  *   0 = no transmission, 1 + mode = transmit with that mode.

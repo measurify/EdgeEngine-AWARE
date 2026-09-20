@@ -201,7 +201,8 @@ class NodeStateTracker:
         state = tracker.state()            # -> policy observation
         ... execute the action ...
         tracker.on_measurement(measurement)   # if sensing happened
-        tracker.on_transmission(packet, acked, now_s)  # if a tx happened
+        tracker.on_transmission(packet, acked, now_s, mode, margin_db)  # if a tx happened
+        # (pass the mode used and the ACK margin, or the path-loss estimate cannot be updated correctly)
     """
 
     def __init__(self, profile: NodeProfile):

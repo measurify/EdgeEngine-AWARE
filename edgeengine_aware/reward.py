@@ -6,14 +6,15 @@
              - rejection_penalty - waste_penalty
 
 Scales (defaults, 7-day episode = 672 steps): the tracking utility is worth up
-to 0.1 * criticality (1..3) per step, i.e. ~100-120 per episode for a policy
+to 0.1 * criticality (1..3) per step, i.e. ~100-140 per episode for a policy
 that keeps the application well informed; one high-quality sample + uplink
 costs 0.12; the staleness penalty saturates at lambda_stale * w_priority
 (0.05 / 0.10 / 0.20 per step) after tau_stale_s = 6 h - a policy that never
 transmits loses ~120 per episode to it; the battery penalty grows
 quadratically below ``safe_soc`` up to lambda_battery (0.5) per step at
 SoC = 0, plus lambda_depletion (2.0) at every step in which the node actually
-browns out. Energy penalties alone (~5 for hourly reporting) do not dominate:
+browns out. Energy penalties alone (~20 per episode for hourly high-quality
+reporting in the standard mode: 168 x 0.12) do not dominate:
 what makes energy binding is the battery penalty, which an always-on policy
 pays to the tune of several hundred per episode.
 """

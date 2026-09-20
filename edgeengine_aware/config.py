@@ -195,10 +195,11 @@ class CommunicationConfig:
         path_loss(t) = path_loss_mean_db + slow_fading(t) + fast_fading   (dB)
 
     ``slow_fading`` is an AR(1) process (shadowing, vegetation, humidity);
-    ``fast_fading`` is redrawn at every attempt. With the defaults the
-    *standard* mode has a mean margin of +4 dB (p ~ 0.9), the *fast* mode
-    -2 dB (p ~ 0.2 on average but ~0.9 when the slow fading is favourable, at
-    half the energy) and the *robust* mode +12 dB (p ~ 1, at twice the energy).
+    ``fast_fading`` is redrawn at every attempt. With the defaults the mean
+    margins are +4 dB (*standard*), -2 dB (*fast*, half the energy) and +12 dB
+    (*robust*, twice the energy). Averaged over the fading, the long-run
+    delivery ratios are about 0.75 / 0.36 / 0.98; at zero slow fading they are
+    0.93 / 0.21 / 1.0, so the fast mode pays off only in favourable phases.
     """
 
     modes: tuple[RadioModeConfig, ...] = DEFAULT_RADIO_MODES

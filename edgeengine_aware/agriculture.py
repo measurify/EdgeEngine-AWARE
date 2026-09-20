@@ -10,10 +10,12 @@ per step of length ``dt`` are
     theta(t+1) = clip(theta(t) - ET(t) * dt + rain(t) + irrigation(t) + noise, 0, max)
 
     ET(t) = et_rate_per_day / 86400 * (1 + et_temp_coeff * (T(t) - T_mean))
-            * (1 - a + a * pi/2 * daylight_factor(t))     with a = et_diurnal_amplitude
+            * ((1 - a) + a * (pi/2) * (24 / daylight_hours) * daylight_factor(t))
+                                                          with a = et_diurnal_amplitude
 
-(the factor pi/2 makes the 24-hour mean of the modulation equal to 1, so
-``et_rate_per_day`` is the actual mean daily ET at the reference temperature)
+(the factor (pi/2) * (24 / daylight_hours) makes the 24-hour mean of the
+modulation equal to 1, so ``et_rate_per_day`` is the actual mean daily ET at
+the reference temperature; with 12 h of daylight the factor is pi)
 
 Rain events follow a Poisson process; irrigation is applied by an external
 actor (the farmer's system) some random time after the *true* moisture drops

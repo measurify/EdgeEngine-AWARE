@@ -8,7 +8,7 @@
  * It mirrors deployment.NodeController in Python step by step.
  *
  * Build (host, with a rule-based or MLP header generated into this folder):
- *   python tools/export_c.py examples/rl_runs/ppo_default_bundle.json -o firmware/eea_policy_data.h
+ *   python tools/export_c.py examples/bundles/ppo_default.json -o firmware/eea_policy_data.h
  *   cc -std=c99 -O2 -I firmware firmware/eea_node.c firmware/main_example.c -lm -o node_example
  */
 #include <stdio.h>

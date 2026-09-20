@@ -7,7 +7,8 @@ implemented by
 
 * a stochastic model (this package: ``energy.py``, ``sensing.py``, ...),
 * a driver on a microcontroller (ADC, fuel gauge, sensor driver, radio stack),
-* a replay of recorded traces (future: real sensor / harvesting traces).
+* a replay of recorded traces (``traces.py``: irradiance and field traces;
+  a trace-driven ``Sensor`` / ``Radio`` would follow the same pattern).
 
 Only *measurable* quantities cross these interfaces. Hidden ground truth
 (true soil moisture, future irradiance, ...) stays inside the simulated

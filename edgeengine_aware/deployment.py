@@ -8,10 +8,11 @@ Three things live here:
   policy receives byte-for-byte the same observation vector it saw in
   training and its actions are executed by the same feasibility rule.
 
-* :class:`MockHardwareBackend` - stand-in drivers (a scripted "battery", a
-  fake harvester, a sensor that returns values from a trace, a radio that
-  always/never/randomly ACKs). It has **no ground truth**: it only knows what
-  a real board would know. It exists to prove that the controller and the
+* :class:`MockHardwareBackend` - stand-in drivers (a fuel gauge with a minimal
+  power-path emulation, a harvester monitor fed by a callable, a sensor driver
+  reading a callable with the profile's noise, a radio whose ACKs follow a
+  link budget at a fixed path loss). It has **no ground truth**: it only knows
+  what a real board would know. It exists to prove that the controller and the
   policy run unchanged outside the simulator, and it is what a real port
   replaces with ADC / I2C / radio-stack calls.
 

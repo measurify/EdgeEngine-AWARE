@@ -122,7 +122,7 @@ class SB3Policy:
         self.reset()
 
     def reset(self) -> None:
-        self._state = None  # recurrent policies would keep their hidden state here
+        self._state = None  # hidden state of a recurrent policy (RecurrentPPO); None for feed-forward models
 
     def act(self, observation) -> np.ndarray:
         action, self._state = self.model.predict(np.asarray(observation, dtype=np.float32), state=self._state, deterministic=self.deterministic)

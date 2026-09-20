@@ -10,10 +10,12 @@ becomes visible where a fixed duty cycle cannot cope.
 Scenario                what is stressed                            what a good policy does
 ----------------------  ------------------------------------------  --------------------------------------------
 default                 nothing in particular (mixed weather)       report ~hourly, more near thresholds
-cloudy_week             harvesting ~40 % of default, dark days      slow down early, keep a reserve, use cheap checks
-tiny_battery            storage halved, small buffer                smooth consumption, avoid bursts at night
-lossy_link              +6 dB path loss, deep slow fading           choose the radio mode from the link estimate
-drought                 fast drying, no rain, slow irrigation       track the approach to the thresholds closely
+cloudy_week             harvesting ~55 % of default (30 J/day),     slow down early, keep a reserve, use cheap checks
+                        battery starts at 40 %
+tiny_battery            storage halved (150 J), small buffer        smooth consumption, avoid bursts at night
+lossy_link              +6 dB path loss, slower fading              choose the radio mode from the link estimate
+drought                 fast drying, almost no rain, slow           track the approach to the thresholds closely
+                        irrigation
 demanding_application   frequent elevated/urgent campaigns          follow the priority, save energy in between
 """
 
@@ -45,10 +47,12 @@ def tiny_battery() -> EdgeEngineAwareConfig:
 
 
 def lossy_link() -> EdgeEngineAwareConfig:
-    """Node far from the gateway: +6 dB path loss and slower fading. The
-    standard mode drops to a mean margin of -2 dB (p ~ 0.25), the robust mode
-    keeps +6 dB (p ~ 0.85) at twice the energy; the fast mode only works in
-    the favourable fading phases."""
+    """Node far from the gateway: +6 dB path loss and slower fading (AR(1)
+    coefficient 0.98 instead of 0.97, i.e. bad phases last longer). Mean
+    margins become -8 / -2 / +6 dB for fast / standard / robust; averaged over
+    the fading, the standard mode delivers ~40 % and the robust mode ~85 % of
+    the uplinks at twice the energy; the fast mode only works in favourable
+    fading phases."""
     cfg = default_config()
     cfg.communication.path_loss_mean_db += 6.0
     cfg.communication.slow_fading_autocorr = 0.98

@@ -232,13 +232,13 @@ policies = {
     "periodic 1h": lambda: PeriodicPolicy(period_steps=4, sensing_level=2, tx=2),
     "periodic 3h": lambda: PeriodicPolicy(period_steps=12, sensing_level=2, tx=3),
 }
-bundle_path = next((p for p in [RUNS / "seeds_long" / "ppo_seed0_bundle.json", RUNS / "ppo_default_bundle.json"] if p.exists()), None)
+bundle_path = next((p for p in [RUNS / "seeds_long" / "ppo_seed0_bundle.json", RUNS / "ppo_default_bundle.json", ROOT / "examples" / "bundles" / "ppo_default.json"] if p.exists()), None)
 if bundle_path is not None:
     bundle = PolicyBundle.load(bundle_path)
     policies["PPO (exported)"] = lambda: NumpyMLPPolicy(bundle.model)
     print("PPO bundle:", bundle_path.relative_to(ROOT), "—", bundle.metadata.get("notes", ""))
 else:
-    print("no exported PPO bundle found under examples/rl_runs — run train_rl.ipynb first; evaluating the baselines only")
+    print("no PPO bundle found (examples/bundles/ppo_default.json or examples/rl_runs/*) — evaluating the baselines only")
 
 season_days = {"winter": (0, 59), "spring": (59, 151), "summer": (151, 243), "autumn": (243, 334)}
 envs = {}

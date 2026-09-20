@@ -314,9 +314,9 @@ def test_mlp_flat_q_values_decoding(profile, tmp_path):
 
 
 def test_exported_ppo_bundle_if_present(profile, tmp_path):
-    bundle_path = ROOT / "examples" / "rl_runs" / "ppo_default_bundle.json"
+    bundle_path = ROOT / "examples" / "bundles" / "ppo_default.json"
     if not bundle_path.exists():
-        pytest.skip("no exported PPO bundle (run the RL notebook)")
+        pytest.skip("shipped PPO bundle not found")
     bundle = json.loads(bundle_path.read_text())
     h = Harness(bundle, tmp_path / "c_ppo")
     try:

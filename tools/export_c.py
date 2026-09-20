@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn a ``PolicyBundle`` JSON file into a C header for the firmware runtime.
 
-    python tools/export_c.py examples/rl_runs/ppo_default_bundle.json -o firmware/eea_policy_data.h
+    python tools/export_c.py examples/bundles/ppo_default.json -o firmware/eea_policy_data.h
 
 The header defines
 

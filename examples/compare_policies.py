@@ -30,9 +30,10 @@ def main() -> None:
     if args.days:
         cfg.time.episode_days = args.days
     env = ea.EdgeEngineAwareEnv(cfg)
+    profile = ea.NodeProfile.from_config(cfg)  # gives the rule-based policy its link-budget table (radio-mode choice)
 
     policies = {
-        "rule-based": RuleBasedPolicy,
+        "rule-based": lambda: RuleBasedPolicy(profile=profile),
         "random": lambda: RandomPolicy(seed=0),
         "periodic 1h high": lambda: PeriodicPolicy(4, 2),
         "periodic 1h low": lambda: PeriodicPolicy(4, 1),
