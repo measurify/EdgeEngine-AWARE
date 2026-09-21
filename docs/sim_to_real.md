@@ -82,6 +82,7 @@ value (the path-loss offset is added, in dB):
 | `cloud_variability` | ×[0.5, 1.5] | intra-day cloud noise and day-to-day clearness spread |
 | `battery_capacity` | ×[0.8, 1.2] | capacity (the initial SoC is a fraction, so the initial energy scales too) |
 | `baseline_power` | ×[0.7, 1.5] | always-on consumption |
+| `random_start_weekday` | on | scheduled domains only (indoor air, industrial): the weekday of episode day 0 is drawn uniformly, so training weeks also start on weekends |
 
 Two design points:
 

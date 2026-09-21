@@ -219,6 +219,27 @@ def test_agriculture_defaults_unchanged():
     assert env.field is env.process
 
 
+def test_random_start_weekday_only_for_scheduled_domains():
+    from edgeengine_aware.config import randomize_config
+
+    cfg = domain_config("industrial")
+    cfg.randomization.enabled = True
+    days = {randomize_config(cfg, np.random.default_rng(s)).time.start_weekday for s in range(40)}
+    assert len(days) == 7
+    cfg.randomization.random_start_weekday = False
+    assert randomize_config(cfg, np.random.default_rng(0)).time.start_weekday == 0
+    agri = ea.default_config()
+    agri.randomization.enabled = True
+    assert all(randomize_config(agri, np.random.default_rng(s)).time.start_weekday == 0 for s in range(10))
+    env = ea.EdgeEngineAwareEnv(domain_config("indoor_air"))
+    env.base_config.randomization.enabled = True
+    starts = set()
+    for s in range(20):
+        env.reset(seed=s)
+        starts.add(env.schedule.start_weekday)
+    assert len(starts) >= 4
+
+
 def test_thermoelectric_requires_industrial_process():
     cfg = ea.default_config()
     cfg.harvesting_source = "thermoelectric"

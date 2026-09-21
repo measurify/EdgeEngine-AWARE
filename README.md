@@ -298,7 +298,8 @@ at every reset (`MixedScenarioEnv`) — the recommended training distribution.
 parameters at every `reset()` so that a trained policy does not over-fit one exact device:
 sensor noise ×[0.7, 1.5], sensing energy ×[0.8, 1.3], radio energies ×[0.8, 1.3], mean path
 loss ±3 dB, solar intensity ×[0.6, 1.2], cloud variability ×[0.5, 1.5], battery capacity
-×[0.8, 1.2], always-on power ×[0.7, 1.5] (all uniform). The randomised energy costs are what
+×[0.8, 1.2], always-on power ×[0.7, 1.5] (all uniform); in the domains with a weekly schedule
+(§10) the weekday on which the episode starts is drawn at random too. The randomised energy costs are what
 the node reports in its observation, exactly as a real device would report its own measured
 profile. Enable with `cfg.randomization.enabled = True` or `get_scenario(name, randomize=True)`.
 

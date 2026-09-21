@@ -788,6 +788,11 @@ class DomainRandomizationConfig:
     cloud_variability: tuple[float, float] = (0.5, 1.5)
     battery_capacity: tuple[float, float] = (0.8, 1.2)
     baseline_power: tuple[float, float] = (0.7, 1.5)
+    random_start_weekday: bool = True
+    """Domains with a weekly activity schedule only: draw the weekday of episode
+    day 0 uniformly at every reset, so that a policy also sees weeks that start
+    on a Saturday (no activity, no energy for two days). No effect on the
+    agriculture domain."""
 
 
 # ---------------------------------------------------------------------------
@@ -932,4 +937,6 @@ def randomize_config(base: EdgeEngineAwareConfig, rng) -> EdgeEngineAwareConfig:
     cfg.schedule.noise_std *= k
     cfg.storage.capacity_j *= f(dr.battery_capacity)
     cfg.mcu.baseline_power_w *= f(dr.baseline_power)
+    if dr.random_start_weekday and cfg.uses_schedule:  # drawn last: the agriculture stream is unchanged
+        cfg.time.start_weekday = int(rng.integers(0, 7))
     return cfg
