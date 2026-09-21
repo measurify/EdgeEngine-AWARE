@@ -52,6 +52,10 @@ class TimeConfig:
     start_hour: float = 0.0
     """Time of day (hours, 0-24) at which the episode starts."""
 
+    start_weekday: int = 0
+    """Weekday of episode day 0 (0 = Monday ... 6 = Sunday); used by the
+    domains with a weekly activity schedule."""
+
     @property
     def max_steps(self) -> int:
         return int(round(self.episode_days * DAY_S / self.timestep_s))
@@ -321,6 +325,324 @@ class AgricultureConfig:
     """A change of true moisture larger than this within one step (rain,
     irrigation) is registered as an 'environmental event'."""
 
+    def quantity(self) -> "QuantityConfig":
+        return QuantityConfig(
+            name="soil moisture",
+            unit="fraction of field capacity",
+            physical_min=0.0,
+            physical_max=1.0,
+            warning_threshold=self.warning_threshold,
+            critical_threshold=self.critical_threshold,
+            critical_is_upper=False,
+            event_change_threshold=self.event_change_threshold,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Monitored quantity: how the hidden scalar is presented to node and application
+# ---------------------------------------------------------------------------
+@dataclass
+class QuantityConfig:
+    """Semantics of the monitored scalar, shared by every domain.
+
+    The simulator, the node and the application work with a *normalised* value
+    in [0, 1]; ``physical_min``/``physical_max`` only serve display and traces.
+    Two thresholds define the stress zones. ``critical_is_upper`` says on which
+    side the danger lies: soil moisture is dangerous when *low*, CO2 or a
+    bearing temperature when *high*. Everything downstream (importance,
+    priority, criticality, zones) reads this flag, so a policy sees the same
+    18-vector whatever the domain.
+    """
+
+    name: str = "soil moisture"
+    unit: str = "fraction of field capacity"
+    physical_min: float = 0.0
+    physical_max: float = 1.0
+    warning_threshold: float = 0.35
+    critical_threshold: float = 0.25
+    critical_is_upper: bool = False
+    event_change_threshold: float = 0.05
+    """A change of the normalised value larger than this within one step is an
+    'environmental event' worth reporting."""
+
+    def to_physical(self, value: float) -> float:
+        return self.physical_min + value * (self.physical_max - self.physical_min)
+
+    def to_normalised(self, physical: float) -> float:
+        span = self.physical_max - self.physical_min
+        return (physical - self.physical_min) / span if span else 0.0
+
+    def zone(self, value: float) -> int:
+        """0 = normal, 1 = warning, 2 = critical."""
+        if self.critical_is_upper:
+            if value > self.critical_threshold:
+                return 2
+            if value > self.warning_threshold:
+                return 1
+            return 0
+        if value < self.critical_threshold:
+            return 2
+        if value < self.warning_threshold:
+            return 1
+        return 0
+
+    def beyond_critical(self, value: float) -> bool:
+        """At or beyond the critical threshold (saturation of importance / criticality)."""
+        return value >= self.critical_threshold if self.critical_is_upper else value <= self.critical_threshold
+
+    def validate(self) -> None:
+        if self.critical_is_upper and not self.critical_threshold > self.warning_threshold:
+            raise ValueError("with critical_is_upper the critical threshold must be above the warning threshold")
+        if not self.critical_is_upper and not self.critical_threshold < self.warning_threshold:
+            raise ValueError("critical_threshold must be below warning_threshold")
+
+
+# ---------------------------------------------------------------------------
+# Weekly activity schedule (people in a room, a machine on shift) - shared by a
+# domain's process and its harvesting source
+# ---------------------------------------------------------------------------
+@dataclass
+class ScheduleConfig:
+    """Hidden weekly activity level in [0, 1] driving both the monitored
+    process and the energy source of the indoor and industrial domains.
+
+    Activity is ``base_level`` inside the active window of an active day (with
+    an optional midday dip), 0 otherwise, multiplied by a random per-day
+    factor and perturbed by a within-day AR(1) term; random *exceptions*
+    (a day off, an overtime day) flip the day type.
+    """
+
+    active_days: tuple[int, ...] = (0, 1, 2, 3, 4)
+    """Weekdays with activity (0 = Monday ... 6 = Sunday)."""
+
+    start_hour: float = 8.0
+    end_hour: float = 18.0
+    ramp_h: float = 0.5
+    """Duration of the ramps at the start and end of the active window [h]."""
+
+    base_level: float = 0.8
+    """Activity level inside the window on a typical day."""
+
+    dip_hours: tuple[float, float] | None = (12.5, 13.5)
+    dip_level: float = 0.3
+    """Optional midday dip (lunch break) with its level."""
+
+    day_factor_std: float = 0.15
+    """Std of the per-day multiplicative factor (uniform-ish variety between days)."""
+
+    noise_std: float = 0.08
+    noise_autocorr: float = 0.8
+    """Within-day AR(1) perturbation of the level."""
+
+    p_day_off: float = 0.05
+    """Probability that an active day is unexpectedly inactive (holiday, breakdown)."""
+
+    p_extra_day: float = 0.10
+    """Probability that an inactive day is unexpectedly active (overtime, Saturday opening)."""
+
+
+# ---------------------------------------------------------------------------
+# Domain: indoor air quality (CO2 in a classroom / office)
+# ---------------------------------------------------------------------------
+@dataclass
+class IndoorAirConfig:
+    """CO2 mass balance of a room driven by the activity schedule (occupancy).
+
+        dC/dt = G * N_max * occupancy(t) / V  -  lambda(t) * (C - C_out)
+
+    with ventilation ``lambda`` in air changes per hour, higher when the HVAC
+    runs (during the active window) and after a window-opening event.
+    """
+
+    room_volume_m3: float = 150.0
+    max_occupants: float = 25.0
+    co2_per_person_l_h: float = 18.0
+    """CO2 generation per person [L/h] (sedentary adult ~ 18 L/h)."""
+
+    outdoor_ppm: float = 420.0
+    ach_base: float = 0.6
+    """Air changes per hour with the HVAC off (infiltration)."""
+
+    ach_hvac: float = 2.5
+    """Air changes per hour with the HVAC running (active window)."""
+
+    window_events_per_day: float = 1.0
+    """Poisson rate of window openings during activity; each raises the
+    ventilation to ``ach_window`` for ``window_duration_s``."""
+
+    ach_window: float = 8.0
+    window_duration_s: float = 20.0 * 60.0
+
+    process_noise_ppm: float = 5.0
+
+    ppm_min: float = 400.0
+    ppm_max: float = 2000.0
+    """Range mapped to the normalised value [0, 1]."""
+
+    warning_ppm: float = 1000.0
+    critical_ppm: float = 1500.0
+    event_change_ppm: float = 120.0
+
+    initial_ppm_range: tuple[float, float] = (420.0, 700.0)
+
+    def quantity(self) -> QuantityConfig:
+        span = self.ppm_max - self.ppm_min
+        return QuantityConfig(
+            name="CO2 concentration",
+            unit="ppm",
+            physical_min=self.ppm_min,
+            physical_max=self.ppm_max,
+            warning_threshold=(self.warning_ppm - self.ppm_min) / span,
+            critical_threshold=(self.critical_ppm - self.ppm_min) / span,
+            critical_is_upper=True,
+            event_change_threshold=self.event_change_ppm / span,
+        )
+
+
+@dataclass
+class IndoorLightConfig:
+    """Indoor photovoltaic harvesting.
+
+        P(t) = cell_power_w_at_ref * illuminance(t) / reference_lux * efficiency
+        illuminance(t) = artificial_lux * lights_on(t) + daylight_lux * daylight(t) * weather
+
+    Lights are on when the activity level is above ``lights_threshold``;
+    daylight follows a half-sine day scaled by ``daylight_lux`` (0 for a
+    windowless room) and a slowly varying weather factor.
+    """
+
+    cell_power_w_at_ref: float = 200e-6
+    """Cell output at ``reference_lux`` [W] (e.g. 20 cm2 of amorphous silicon,
+    ~10 uW/cm2 at 500 lux)."""
+
+    reference_lux: float = 500.0
+    efficiency: float = 0.7
+    """Harvesting-circuit efficiency (boost converter at very low power)."""
+
+    artificial_lux: float = 500.0
+    lights_threshold: float = 0.05
+    """Activity level above which the lights are on."""
+
+    daylight_lux: float = 150.0
+    """Peak daylight contribution at the cell position (0 = no window)."""
+
+    sunrise_hour: float = 7.0
+    sunset_hour: float = 19.0
+    daylight_autocorr: float = 0.9
+    daylight_noise_std: float = 0.25
+    measurement_noise_std: float = 0.05
+
+
+# ---------------------------------------------------------------------------
+# Domain: industrial condition monitoring (bearing temperature of a motor)
+# ---------------------------------------------------------------------------
+@dataclass
+class IndustrialConfig:
+    """Thermal model of a motor bearing driven by the shift schedule (load).
+
+        C_th dT/dt = P_heat(load, health) - k (T - T_amb)
+        P_heat     = heat_w_at_full_load * load * (1 + fault_heat_gain * (1 - health))
+
+    ``health`` in (0, 1] degrades slowly while the machine runs; a random
+    *fault onset* accelerates the degradation until maintenance (triggered
+    some time after the temperature exceeds the critical threshold) restores it.
+    """
+
+    ambient_c: float = 22.0
+    ambient_amplitude_c: float = 3.0
+    thermal_time_constant_s: float = 45.0 * 60.0
+    """Time constant of the bearing/casing temperature."""
+
+    temp_rise_full_load_c: float = 45.0
+    """Steady-state temperature rise above ambient at full load and full health."""
+
+    fault_heat_gain: float = 1.2
+    """Extra heating at health 0 (relative)."""
+
+    wear_per_hour: float = 0.002
+    """Health lost per hour of operation (normal wear)."""
+
+    fault_onsets_per_day: float = 0.15
+    """Poisson rate (per active day) of a fault onset."""
+
+    fault_wear_per_hour: float = 0.04
+    """Health lost per hour of operation after a fault onset."""
+
+    maintenance_delay_mean_s: float = 12.0 * HOUR_S
+    """Mean delay of the maintenance intervention after the temperature exceeds
+    the critical threshold (exponential); maintenance restores health to 1."""
+
+    process_noise_c: float = 0.3
+
+    temp_min_c: float = 20.0
+    temp_max_c: float = 120.0
+    warning_c: float = 70.0
+    critical_c: float = 90.0
+    event_change_c: float = 5.0
+
+    initial_health_range: tuple[float, float] = (0.6, 1.0)
+
+    def quantity(self) -> QuantityConfig:
+        span = self.temp_max_c - self.temp_min_c
+        return QuantityConfig(
+            name="bearing temperature",
+            unit="degC",
+            physical_min=self.temp_min_c,
+            physical_max=self.temp_max_c,
+            warning_threshold=(self.warning_c - self.temp_min_c) / span,
+            critical_threshold=(self.critical_c - self.temp_min_c) / span,
+            critical_is_upper=True,
+            event_change_threshold=self.event_change_c / span,
+        )
+
+
+@dataclass
+class ThermoelectricConfig:
+    """Thermoelectric (TEG) harvesting from the warm casing.
+
+        P(t) = power_w_at_ref_dt * (dT(t) / reference_dt_c)^2 * efficiency
+        dT(t) = casing temperature - ambient
+
+    (open-circuit voltage proportional to dT, maximum power quadratic in dT).
+    """
+
+    power_w_at_ref_dt: float = 1.2e-3
+    """Electrical power at ``reference_dt_c`` [W] (a 30x30 mm module with a
+    small heat sink at 30 K gives one to a few mW)."""
+
+    reference_dt_c: float = 30.0
+    efficiency: float = 0.6
+    """Boost-converter / MPPT efficiency."""
+
+    min_dt_c: float = 3.0
+    """Below this temperature difference the converter does not start."""
+
+    measurement_noise_std: float = 0.05
+
+
+# ---------------------------------------------------------------------------
+# Radio presets
+# ---------------------------------------------------------------------------
+BLE_RADIO_MODES: tuple[RadioModeConfig, ...] = (
+    RadioModeConfig("fast", energy_j=0.0006, tx_power_dbm=0.0, sensitivity_dbm=-92.0),  # LE 2M PHY-like
+    RadioModeConfig("standard", energy_j=0.0012, tx_power_dbm=0.0, sensitivity_dbm=-97.0),  # LE 1M PHY-like
+    RadioModeConfig("robust", energy_j=0.0040, tx_power_dbm=0.0, sensitivity_dbm=-103.0),  # LE Coded S8-like
+)
+
+
+def ble_radio(path_loss_mean_db: float = 93.0) -> CommunicationConfig:
+    """A short-range BLE-like radio (three PHY modes, sub-millijoule uplinks).
+    With the default path loss the mean margins are -1 / +4 / +10 dB."""
+    return CommunicationConfig(
+        modes=BLE_RADIO_MODES,
+        reference_mode=1,
+        path_loss_mean_db=path_loss_mean_db,
+        slow_fading_std_db=4.0,
+        slow_fading_autocorr=0.9,
+        fast_fading_std_db=3.0,
+        margin_scale_db=1.5,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Remote application (utility + priority)
@@ -487,10 +809,40 @@ class EdgeEngineAwareConfig:
     observation: ObservationConfig = field(default_factory=ObservationConfig)
     randomization: DomainRandomizationConfig = field(default_factory=DomainRandomizationConfig)
 
+    domain: str = "agriculture"
+    """Which monitored process drives the episode: 'agriculture' (soil moisture,
+    ``agriculture``), 'indoor_air' (CO2, ``indoor_air`` + ``schedule``) or
+    'industrial' (bearing temperature, ``industrial`` + ``schedule``)."""
+
+    harvesting_source: str = "solar"
+    """Energy source: 'solar' (``harvesting``), 'indoor_light' (``indoor_light``)
+    or 'thermoelectric' (``thermoelectric``)."""
+
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+    indoor_air: IndoorAirConfig = field(default_factory=IndoorAirConfig)
+    indoor_light: IndoorLightConfig = field(default_factory=IndoorLightConfig)
+    industrial: IndustrialConfig = field(default_factory=IndustrialConfig)
+    thermoelectric: ThermoelectricConfig = field(default_factory=ThermoelectricConfig)
+
     terminate_on_depletion: bool = False
     """If True the episode *terminates* when the storage is fully depleted.
     Default False: the node browns out, pays a penalty and keeps running once
     energy is harvested again (closer to what happens in the field)."""
+
+    @property
+    def quantity(self) -> QuantityConfig:
+        """Semantics of the monitored scalar for the active domain."""
+        if self.domain == "agriculture":
+            return self.agriculture.quantity()
+        if self.domain == "indoor_air":
+            return self.indoor_air.quantity()
+        if self.domain == "industrial":
+            return self.industrial.quantity()
+        raise ValueError(f"unknown domain {self.domain!r}")
+
+    @property
+    def uses_schedule(self) -> bool:
+        return self.domain in ("indoor_air", "industrial") or self.harvesting_source in ("indoor_light", "thermoelectric")
 
     def copy(self) -> "EdgeEngineAwareConfig":
         """Deep copy (configs are small; ``dataclasses.replace`` is shallow)."""
@@ -527,10 +879,17 @@ class EdgeEngineAwareConfig:
             raise ValueError("radio mode energies must be positive")
         if self.communication.priority_update_mode not in ("immediate", "on_uplink"):
             raise ValueError("priority_update_mode must be 'immediate' or 'on_uplink'")
-        if not self.agriculture.critical_threshold < self.agriculture.warning_threshold:
-            raise ValueError("critical_threshold must be below warning_threshold")
+        if self.domain not in ("agriculture", "indoor_air", "industrial"):
+            raise ValueError("domain must be 'agriculture', 'indoor_air' or 'industrial'")
+        if self.harvesting_source not in ("solar", "indoor_light", "thermoelectric"):
+            raise ValueError("harvesting_source must be 'solar', 'indoor_light' or 'thermoelectric'")
+        if self.harvesting_source == "thermoelectric" and self.domain != "industrial":
+            raise ValueError("the thermoelectric source needs the industrial process (it harvests the casing heat)")
+        self.quantity.validate()
         if not 0.0 < self.harvesting.efficiency <= 1.0:
             raise ValueError("harvesting efficiency must be in (0, 1]")
+        if not 0 <= self.time.start_weekday < 7:
+            raise ValueError("start_weekday must be in [0, 7)")
 
 
 def default_config() -> EdgeEngineAwareConfig:
@@ -562,10 +921,15 @@ def randomize_config(base: EdgeEngineAwareConfig, rng) -> EdgeEngineAwareConfig:
     k = f(dr.tx_energy)
     cfg.communication.modes = tuple(dataclasses.replace(m, energy_j=m.energy_j * k) for m in cfg.communication.modes)
     cfg.communication.path_loss_mean_db += f(dr.path_loss_db)
-    cfg.harvesting.max_power_w *= f(dr.solar_intensity)
+    k = f(dr.solar_intensity)  # 'source intensity': panel, indoor cell or TEG output
+    cfg.harvesting.max_power_w *= k
+    cfg.indoor_light.cell_power_w_at_ref *= k
+    cfg.thermoelectric.power_w_at_ref_dt *= k
     k = f(dr.cloud_variability)
     cfg.harvesting.cloud_noise_std *= k
     cfg.harvesting.clearness_std *= k
+    cfg.indoor_light.daylight_noise_std *= k
+    cfg.schedule.noise_std *= k
     cfg.storage.capacity_j *= f(dr.battery_capacity)
     cfg.mcu.baseline_power_w *= f(dr.baseline_power)
     return cfg

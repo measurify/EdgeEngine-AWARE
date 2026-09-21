@@ -4,6 +4,7 @@
     python examples/train_seeds.py --algo ppo_stack --seed 0        # PPO + frame stacking (4)
     python examples/train_seeds.py --algo dqn --seed 1 --steps 500000
     python examples/train_seeds.py --algo rppo --seed 0             # RecurrentPPO (needs sb3-contrib)
+    python examples/train_seeds.py --algo ppo --domain industrial --eval-domain all   # another domain, cross-domain evaluation
 
 Every run writes ``<out>/<algo>_seed<N>.json`` (evaluation rows, learning curve,
 metadata), the best and last checkpoints in ``<out>/<algo>_seed<N>/`` and, for
@@ -36,17 +37,18 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack  # noqa:
 import edgeengine_aware as ea  # noqa: E402
 from edgeengine_aware.deployment import export_policy  # noqa: E402
 from edgeengine_aware.rl import SB3Policy, StackedPolicy, evaluate, export_sb3_mlp, make_env, make_env_fn  # noqa: E402
-from edgeengine_aware.scenarios import SCENARIOS  # noqa: E402
+from edgeengine_aware.scenarios import scenario_names  # noqa: E402
 
 ALGOS = ("ppo", "dqn", "ppo_stack", "rppo")
 N_STACK = 4
 NET = [64, 64]
 
 
-def build(algo: str, seed: int, n_envs: int, log_dir: Path):
-    """Return (model, eval_callback, policy_factory) for ``algo``."""
+def build(algo: str, seed: int, n_envs: int, log_dir: Path, domain: str = "agriculture"):
+    """Return (model, eval_callback, policy_factory) for ``algo`` trained on the
+    mixture of the scenarios of ``domain`` ('all' = every domain)."""
     flat = algo == "dqn"
-    scenarios = list(SCENARIOS)
+    scenarios = scenario_names(domain)
 
     def vec(seed_offset: int):
         v = DummyVecEnv([make_env_fn(scenarios, randomize=True, flat_actions=flat, seed=seed * 1000 + seed_offset + i) for i in range(n_envs)])
@@ -91,15 +93,19 @@ def main() -> None:
     ap.add_argument("--eval-seeds", type=int, default=20, help="held-out seeds per scenario for the final evaluation")
     ap.add_argument("--out", type=Path, default=ROOT / "examples" / "rl_runs" / "seeds")
     ap.add_argument("--threads", type=int, default=2)
+    ap.add_argument("--domain", default="agriculture", help="training domain: agriculture | indoor_air | industrial | all (mixture of every domain)")
+    ap.add_argument("--eval-domain", default=None, help="domain(s) to evaluate on (default: the training domain; 'all' = every domain)")
+    ap.add_argument("--tag", default=None, help="file-name tag (default: <algo>_seed<N>, or <algo>_<domain>_seed<N> for a non-agricultural domain)")
     args = ap.parse_args()
 
     torch.set_num_threads(args.threads)
     args.out.mkdir(parents=True, exist_ok=True)
-    tag = f"{args.algo}_seed{args.seed}"
+    tag = args.tag or (f"{args.algo}_seed{args.seed}" if args.domain == "agriculture" else f"{args.algo}_{args.domain}_seed{args.seed}")
     log_dir = args.out / tag
     log_dir.mkdir(exist_ok=True)
+    eval_scenarios = scenario_names(args.eval_domain or args.domain)
 
-    model, eval_env, policy_factory = build(args.algo, args.seed, args.n_envs, log_dir)
+    model, eval_env, policy_factory = build(args.algo, args.seed, args.n_envs, log_dir, domain=args.domain)
     cb = EvalCallback(eval_env, n_eval_episodes=args.eval_episodes, eval_freq=max(1, args.eval_every // args.n_envs), best_model_save_path=str(log_dir), log_path=str(log_dir), deterministic=True, verbose=0)
     t0 = time.time()
     model.learn(total_timesteps=args.steps, callback=cb, progress_bar=False)
@@ -107,11 +113,13 @@ def main() -> None:
     model.save(log_dir / "last_model.zip")
     best = type(model).load(log_dir / "best_model.zip", device="cpu")
 
-    rows = evaluate({args.algo: policy_factory(best)}, SCENARIOS, seeds=range(1000, 1000 + args.eval_seeds))
+    rows = evaluate({args.algo: policy_factory(best)}, eval_scenarios, seeds=range(1000, 1000 + args.eval_seeds))
     curve = np.load(log_dir / "evaluations.npz")
     result = {
         "algo": args.algo,
         "seed": args.seed,
+        "domain": args.domain,
+        "eval_domain": args.eval_domain or args.domain,
         "steps": args.steps,
         "train_seconds": train_s,
         "n_stack": N_STACK if args.algo == "ppo_stack" else 1,
@@ -121,9 +129,9 @@ def main() -> None:
     }
     (args.out / f"{tag}.json").write_text(json.dumps(result))
     if args.algo in ("ppo", "dqn"):  # frozen contract + weights, ready for tools/export_c.py
-        profile = ea.NodeProfile.from_config(ea.default_config())
+        profile = ea.NodeProfile.from_config(ea.domain_config(args.domain if args.domain != "all" else "agriculture"))
         bundle = export_policy(policy_factory(best)(), profile, policy_type="mlp", model=export_sb3_mlp(best),
-                               notes=f"{args.algo.upper()} {args.steps:,} steps, seed {args.seed}, mixture of scenarios, domain randomisation on")
+                               notes=f"{args.algo.upper()} {args.steps:,} steps, seed {args.seed}, domain {args.domain} (mixture of its scenarios), domain randomisation on")
         bundle.save(args.out / f"{tag}_bundle.json")
     by_scen = {}
     for r in rows:

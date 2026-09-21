@@ -35,7 +35,7 @@ OBS_DEFAULTS = {
     "path_loss_min_db": 110.0,
     "path_loss_max_db": 170.0,
 }
-PROFILE_DEFAULTS = {"timestep_s": 900.0, "baseline_power_w": 200e-6, "reserve_soc": 0.02, "ack_available": True}
+PROFILE_DEFAULTS = {"timestep_s": 900.0, "baseline_power_w": 200e-6, "reserve_soc": 0.02, "ack_available": True, "critical_is_upper": False}
 RULE_FIELDS = [
     "soc_critical", "soc_low", "deep_eco_interval_h", "soc_high", "harvest_strong", "report_interval_h",
     "report_interval_eco_factor", "eco_sensing_level", "report_interval_generous_factor", "check_interval_h",
@@ -85,6 +85,7 @@ def profile_block(profile: dict[str, Any]) -> str:
     for key in ("warning_threshold", "critical_threshold", "timestep_s", "baseline_power_w", "reserve_soc"):
         lines.append(f"    .{key} = {c_double(prof[key])},")
     lines.append(f"    .ack_available = {'true' if prof['ack_available'] else 'false'},")
+    lines.append(f"    .critical_is_upper = {'true' if prof.get('critical_is_upper', False) else 'false'},")
     for key in OBS_DEFAULTS:
         lines.append(f"    .{key} = {c_double(obs[key])},")
     lines.append("};")

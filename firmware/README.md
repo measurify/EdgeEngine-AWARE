@@ -38,8 +38,9 @@ The header defines:
 
 * `EEA_PROFILE` (`eea_profile_t`) — every `NodeProfile` constant: sensing energies and noise
   levels, radio energies / transmit powers / sensitivities per mode, the reference mode, the
-  moisture thresholds, the decision interval, the always-on power, the brown-out reserve,
-  whether ACKs are available, and the observation normalisation constants;
+  two thresholds and the side of the danger (`critical_is_upper`: low for soil moisture, high
+  for CO₂ or a temperature), the decision interval, the always-on power, the brown-out
+  reserve, whether ACKs are available, and the observation normalisation constants;
 * either `EEA_RULE_PARAMS` (`eea_rule_params_t`, with `#define EEA_HAS_RULE_PARAMS`) for a
   rule-based bundle, or `EEA_MLP` (`eea_mlp_t`, with `#define EEA_HAS_MLP`) plus the weight
   arrays `EEA_L<i>_W` / `EEA_L<i>_b` for a network bundle;
@@ -55,8 +56,10 @@ header from the bundle that was validated in simulation.
 ## Equivalence with Python
 
 `tests/test_firmware.py` compiles `eea_node.c` and `test/eea_harness.c` with headers
-generated from a rule-based bundle and from network bundles (random ones and the shipped
-`ppo_default.json`), replays thousands of tracker events on both sides and checks that:
+generated from a rule-based bundle of each of the three domain profiles (agriculture,
+indoor air, industrial — different energies, radio tables and danger side) and from network
+bundles (random ones and the shipped `ppo_default.json`), replays thousands of tracker events
+on both sides and checks that:
 
 * the 18 observation values are **bit-exact** (`float32`) — the tracker and the observation
   builder compute in `double`, like Python, and round to `float` at the end, like numpy;

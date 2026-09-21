@@ -85,6 +85,7 @@ typedef struct {
     eea_real baseline_power_w;
     eea_real reserve_soc;
     bool ack_available;
+    bool critical_is_upper;   /* danger side of the monitored quantity: false = low (soil moisture), true = high (CO2, temperature) */
     /* ObservationConfig */
     eea_real harvest_ref_power_w;
     eea_real age_scale_s;

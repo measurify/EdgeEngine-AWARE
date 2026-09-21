@@ -494,6 +494,10 @@ class TraceFieldEnvironment:
             h /= 100.0
         return float(np.clip(h, 0.0, 1.0))
 
+    @property
+    def value(self) -> float:
+        return self.moisture
+
     def zone(self, moisture: float | None = None) -> int:
         m = self.moisture if moisture is None else moisture
         if m < self.cfg.critical_threshold:
@@ -586,6 +590,8 @@ class TraceDrivenEnv(EdgeEngineAwareEnv):
         self.source_kwargs = dict(source_kwargs or {})
         self.field_kwargs = dict(field_kwargs or {})
         cfg = config if config is not None else EdgeEngineAwareConfig()
+        if cfg.domain != "agriculture" or cfg.harvesting_source != "solar":
+            raise ValueError("TraceDrivenEnv replays soil/weather traces: it needs the agriculture domain with the solar source")
         self.window = TraceWindow(trace, cfg.time.episode_days * DAY_S + cfg.time.start_hour * HOUR_S, start_day)
         super().__init__(cfg, render_mode=render_mode)
 
@@ -595,10 +601,11 @@ class TraceDrivenEnv(EdgeEngineAwareEnv):
         if self.use_trace_harvesting:
             self.source = TraceSolarEnergySource(self.trace, cfg.harvesting, dt, self.window, **self.source_kwargs)
         if self.use_trace_field:
-            self.field = TraceFieldEnvironment(
+            self.process = TraceFieldEnvironment(
                 self.trace, cfg.agriculture, dt, self.window, field_capacity=self.field_capacity, **self.field_kwargs
             )
-            # the sensor's ground-truth callable resolves ``self.field`` lazily
+            self.field = self.process
+            # the sensor's ground-truth callable resolves ``self.process`` lazily
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         if seed is not None:

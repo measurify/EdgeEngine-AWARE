@@ -37,14 +37,14 @@ Notation: `E_max` is the battery capacity, `age_scale_s` = 24 h, `harvest_ref_po
 | 2 | `harvest_recent` | smoothed harvesting power: EWMA of (1) with α = 0.2, i.e. a memory of roughly the last hour at 15-minute steps | as (1) | computed in firmware |
 | 3 | `time_of_day_sin` | time of day, sine part | `(sin(2π t/86400) + 1) / 2` | real-time clock (RTC) |
 | 4 | `time_of_day_cos` | time of day, cosine part | `(cos(2π t/86400) + 1) / 2` | RTC |
-| 5 | `measurement` | latest stored soil-moisture reading (0 if none yet) | already in [0, 1] (fraction of field capacity) | sensor driver + RAM |
+| 5 | `measurement` | latest stored reading of the monitored quantity (0 if none yet) | already in [0, 1]: fraction of field capacity, (ppm − 400)/1600, (°C − 20)/100 depending on the domain | sensor driver + RAM |
 | 6 | `measurement_quality` | quality tag of the stored reading | `1 − 0.8·σ/σ_cheap`, giving 0 = none, 0.2 = cheap reading, 0.8 = accurate reading | hardware profile (the nominal noise of each sensing level) |
 | 7 | `measurement_age` | time since the stored reading was taken | `age / 24 h`, clipped; 1 if none | timer |
 | 8 | `time_since_tx_success` | time since the last acknowledged uplink | `t / 24 h`, clipped; 1 if none | timer + radio ACK |
 | 9 | `app_info_age` | the node's own estimate of the age of the application's information = (8) + the age the reading had when it was sent | `age / 24 h`, clipped; 1 if none | timer + radio ACK |
 | 10 | `reported_value` | the value carried by the last acknowledged uplink (0 if none) | already in [0, 1] | RAM |
 | 11 | `app_priority` | priority requested by the application: routine / elevated / urgent | `p / 2` → 0, 0.5, 1 | downlink message |
-| 12 | `importance` | how much the stored reading matters: 1 at or below the critical threshold, `exp(−d / 0.10)` otherwise where `d` is the distance to the nearest threshold, 0 if no reading | already in [0, 1] | computed in firmware from the thresholds stored in flash |
+| 12 | `importance` | how much the stored reading matters: 1 at or beyond the critical threshold (below it for soil moisture, above it for CO₂ or a temperature — `NodeProfile.critical_is_upper`), `exp(−d / 0.10)` otherwise where `d` is the distance to the nearest threshold, 0 if no reading | already in [0, 1] | computed in firmware from the thresholds stored in flash |
 | 13 | `link_quality` | EWMA (α = 0.2) of ACK outcomes: 1 = every recent uplink was acknowledged | already in [0, 1] | radio ACK |
 | 14 | `path_loss_est` | estimate of the radio path loss, derived from the last ACK (see below); 1 = unknown or worst | `(PL − 110 dB) / 60 dB`, clipped | ACK signal-to-noise ratio (SNR) or a LoRaWAN `LinkCheckAns`, converted with the link-budget table in flash |
 | 15 | `sense_low_cost` | energy of a cheap reading | `E / E_max`, clipped | hardware profile |

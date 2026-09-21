@@ -51,6 +51,20 @@ class FieldState:
     rain_events: int = 0
     irrigation_events: int = 0
 
+    # -- ProcessState-compatible view (see process.py) -------------------------
+    @property
+    def value(self) -> float:
+        return self.soil_moisture
+
+    @property
+    def aux(self) -> dict:
+        return {
+            "air_temperature_c": self.air_temperature_c,
+            "relative_humidity": self.relative_humidity,
+            "rain_events": self.rain_events,
+            "irrigation_events": self.irrigation_events,
+        }
+
 
 class FieldEnvironment:
     """Stochastic soil / atmosphere simulator."""
@@ -93,6 +107,11 @@ class FieldEnvironment:
         if not c.sunrise_hour < h < c.sunset_hour:
             return 0.0
         return math.sin(math.pi * (h - c.sunrise_hour) / (c.sunset_hour - c.sunrise_hour))
+
+    @property
+    def value(self) -> float:
+        """Normalised monitored value (the process interface of ``process.py``)."""
+        return self.moisture
 
     def zone(self, moisture: float | None = None) -> int:
         m = self.moisture if moisture is None else moisture

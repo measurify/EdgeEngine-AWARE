@@ -20,7 +20,7 @@ from .env import EdgeEngineAwareEnv
 from .interfaces import Policy
 from .observation import OBSERVATION_FIELDS
 from .policies import run_episode
-from .scenarios import SCENARIOS, get_scenario
+from .scenarios import get_scenario, scenario_names
 
 
 # ---------------------------------------------------------------------------
@@ -80,8 +80,10 @@ def make_env(scenario: str | Iterable[str] = "default", *, randomize: bool = Fal
     """Build an environment for a named scenario, or for a mixture of scenarios
     (``"mixed"`` = all of them, or an explicit list of names), optionally with
     domain randomisation and flat actions. ``seed`` seeds the first reset."""
-    if scenario == "mixed":
-        scenario = list(SCENARIOS)
+    if isinstance(scenario, str) and (scenario == "mixed" or scenario.startswith("mixed:") or scenario == "all"):
+        # "mixed" = all agricultural scenarios (historical default), "mixed:<domain>" = one
+        # domain's scenarios, "all" = every scenario of every domain
+        scenario = scenario_names("all" if scenario == "all" else ("agriculture" if scenario == "mixed" else scenario.split(":", 1)[1]))
     if isinstance(scenario, str):
         env: gym.Env = EdgeEngineAwareEnv(get_scenario(scenario, randomize=randomize), render_mode=render_mode)
     else:

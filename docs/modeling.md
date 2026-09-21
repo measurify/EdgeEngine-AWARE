@@ -233,3 +233,70 @@ through quantities the node does measure.
 
 The policy column is contained in the real-node column by construction — both are built from
 `NodeState`. That containment is the architectural condition for sim-to-real transfer.
+
+## 6. The other domains
+
+Sections 2–3 describe the agricultural node. `edgeengine_aware.domains` provides two more
+hidden worlds behind the same observation, action and reward. In both, a hidden **weekly
+activity schedule** (`process.ActivitySchedule`) drives the monitored process *and* the energy
+source, so that energy and information relevance are coupled the way they are in reality.
+
+### 6.1 The activity schedule
+
+    level(t) = base · shape(t) · day_factor(day) · (1 + n(t))       on active days, 0 otherwise
+
+`shape` is 1 inside the active window with half-hour ramps and an optional midday dip;
+`day_factor` is a per-day random factor (σ = 0.15, clipped to [0.3, 1.5]); `n(t)` an AR(1)
+perturbation (σ = 0.08, ρ = 0.8); an active day is unexpectedly inactive with probability
+`p_day_off` (5 %) and an inactive day unexpectedly active with `p_extra_day` (10 %). Episode
+day 0 is a Monday by default (`TimeConfig.start_weekday`).
+
+### 6.2 Indoor air quality (`indoor.IndoorAirProcess`, `indoor.IndoorLightSource`)
+
+CO₂ mass balance of a 150 m³ room with up to 25 occupants, each exhaling 18 L/h of CO₂:
+
+    dC/dt = G · N_max · level(t) / V  −  λ(t) · (C − C_out)          C_out = 420 ppm
+
+`λ` is the ventilation in air changes per hour: 0.6 with the HVAC off, 2.5 while the room is
+active, 8 during a window opening (Poisson, about once per active day, 20 min). At full
+occupancy the steady state is about 1600 ppm, above the critical threshold; the 15-minute
+step uses the exact solution of the linear equation. Monitored value = (C − 400) / 1600,
+thresholds 1000 ppm (warning, 0.375) and 1500 ppm (critical, 0.6875), **danger above**.
+
+Energy: `P = P_ref · lux(t) / 500 · η`, with `lux(t)` = 500 lux when the lights are on (activity
+above 0.05) plus daylight through a window (half-sine day, peak 150 lux, times a random daily
+brightness in [0.4, 1] with AR(1) weather); `P_ref` = 200 µW at 500 lux (about 20 cm² of
+amorphous silicon), `η` = 0.7. A working day yields ~5 J, a weekend day well under 1 J.
+Node: 60 J storage, 20 µW always-on, readings at 20 mJ (σ 80 ppm) / 150 mJ (σ 24 ppm),
+BLE-like radio with 0.6 / 1.2 / 4 mJ uplinks (LE 2M / 1M / Coded S8-like: sensitivities −92 /
+−97 / −103 dBm, 0 dBm transmit power, 93 dB mean path loss). The application escalates on
+information older than 12 h (elevated) or 36 h (urgent).
+
+### 6.3 Industrial condition monitoring (`industrial.BearingProcess`, `industrial.ThermoelectricSource`)
+
+First-order thermal model of a motor bearing under the shift schedule (`load = level(t)`):
+
+    τ dT/dt = T_amb(t) + ΔT_full · load · (1 + g · (1 − health)) − T        τ = 45 min, ΔT_full = 45 K, g = 1.2
+
+`health ∈ (0, 1]` decreases while the machine runs (0.002 per hour of operation; 0.04 per hour
+after a random **fault onset**, Poisson at 0.15 per 16-hour running day). When the temperature
+exceeds the critical threshold, **maintenance** arrives after an exponential delay (mean 12 h)
+and restores `health = 1`. Ambient 22 ± 3 °C daily cosine. Monitored value = (T − 20) / 100,
+thresholds 70 °C (0.5) and 90 °C (0.7), **danger above**; machine starts/stops and
+maintenance count as events.
+
+Energy: a thermoelectric module on the casing, `P = P_ref · (ΔT / 30 K)² · η` with
+`ΔT = T − T_amb`, `P_ref` = 1.2 mW, `η` = 0.6, nothing below ΔT = 3 K. At full-load temperature
+this gives ~1.6–3 mW: hundreds of joules on a working day, zero over the weekend. Node: 120 J
+storage (a weekend of hourly reports), 200 µW always-on, readings at 50 mJ (temperature only,
+σ 3 °C) / 0.5 J (vibration burst with on-board FFT, σ 1 °C), the LoRa-like radio of the
+agricultural node.
+
+### 6.4 What the policy sees
+
+Nothing new. The 18 components are the same; the thresholds, the danger side, the energy
+costs and the harvest reference power are constants of the node profile. `importance`,
+the application's `criticality` and `priority` all read `critical_is_upper`, so "close to
+danger" means the same thing to the policy in every domain. A controller or a policy exported
+for one domain runs in another without any code change — whether it performs well there is
+the question `examples/domains.ipynb` asks.

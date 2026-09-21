@@ -36,11 +36,11 @@ import numpy as np
 from gymnasium import spaces
 
 from .actions import SENSE_NONE, action_nvec, decode_action, plan_execution
-from .agriculture import FieldEnvironment
 from .application import RemoteMonitoringApplication
 from .communication import SimulatedLoRaRadio
 from .config import EdgeEngineAwareConfig, default_config, randomize_config
-from .energy import SimulatedClock, SimulatedEnergyStorage, SolarEnergySource
+from .domains import build_world
+from .energy import SimulatedClock, SimulatedEnergyStorage
 from .interfaces import Packet
 from .metrics import EpisodeLog, EpisodeMetrics
 from .observation import NodeProfile, NodeStateTracker, ObservationBuilder
@@ -50,6 +50,9 @@ from .sensing import SimulatedSoilMoistureSensor
 
 class EdgeEngineAwareEnv(gym.Env):
     """Energy-harvesting Edge IoT node in a smart-agriculture field.
+
+    The hidden world (monitored process and energy source) is chosen by
+    ``config.domain`` / ``config.harvesting_source`` - see ``domains.py``.
 
     Observation: ``Box(0, 1, (18,), float32)`` - see ``ObservationBuilder``.
     Action:      ``MultiDiscrete([3, 1 + n_modes])`` - (sensing level, transmit /
@@ -94,11 +97,13 @@ class EdgeEngineAwareEnv(gym.Env):
         dt = cfg.time.timestep_s
         self.clock = SimulatedClock(cfg.time)
         self.storage = SimulatedEnergyStorage(cfg.storage, charge_efficiency=cfg.storage.charge_efficiency)
-        self.source = SolarEnergySource(cfg.harvesting, dt)
-        self.field = FieldEnvironment(cfg.agriculture, dt)
-        self.sensor = SimulatedSoilMoistureSensor(cfg.sensing, true_value=lambda: self.field.moisture)
+        # the hidden world of the active domain: (weekly schedule or None, monitored process, energy source)
+        self.schedule, self.process, self.source = build_world(cfg, dt)
+        self.field = self.process  # legacy name (the agriculture FieldEnvironment)
+        self.quantity = cfg.quantity
+        self.sensor = SimulatedSoilMoistureSensor(cfg.sensing, true_value=lambda: self.process.value)
         self.radio = SimulatedLoRaRadio(cfg.communication)
-        self.application = RemoteMonitoringApplication(cfg.application, cfg.agriculture, dt)
+        self.application = RemoteMonitoringApplication(cfg.application, self.quantity, dt)
         self.reward_fn = RewardCalculator(cfg.reward)
         self.profile = NodeProfile.from_config(cfg)
         self.obs_builder = ObservationBuilder(self.profile)
@@ -124,17 +129,20 @@ class EdgeEngineAwareEnv(gym.Env):
         start = self.cfg.time.start_hour * 3600.0
         dt = self.cfg.time.timestep_s
         rngs = [np.random.default_rng(int(self.np_random.integers(0, 2**63 - 1))) for _ in range(5)]
+        app_rng = np.random.default_rng(int(self.np_random.integers(0, 2**63 - 1)))
+        if self.schedule is not None:  # domains with a weekly activity schedule draw one more stream
+            self.schedule.reset(np.random.default_rng(int(self.np_random.integers(0, 2**63 - 1))), start_time_s=start)
         self.storage.reset(rngs[0])
+        self.process.reset(rngs[2], start_time_s=start)
         # The harvesting process is started one interval early so that the node's
         # first reading is the power of the interval that *preceded* the episode
         # (what a harvester monitor reports at boot), never the upcoming one.
         self.source.reset(rngs[1], start_time_s=start - dt)
         previous_interval_measured_w = self.source.measured_power_w()
         self.source.update(start)
-        self.field.reset(rngs[2], start_time_s=start)
         self.sensor.reset(rngs[3])
         self.radio.reset(rngs[4])
-        self.application.reset(np.random.default_rng(int(self.np_random.integers(0, 2**63 - 1))), start_time_s=start)
+        self.application.reset(app_rng, start_time_s=start)
         self.clock.reset()
         self.tracker.reset()
 
@@ -145,7 +153,7 @@ class EdgeEngineAwareEnv(gym.Env):
         self.log = EpisodeLog()
         self._last_step = self._empty_last_step()
 
-        self.application.step(self.clock.now_s(), self.field.state())
+        self.application.step(self.clock.now_s(), self.process.state())
         self.tracker.begin_step(
             now_s=self.clock.now_s(),
             time_of_day_s=self.clock.time_of_day_s(),
@@ -164,7 +172,7 @@ class EdgeEngineAwareEnv(gym.Env):
         cfg = self.cfg
         dt = cfg.time.timestep_s
         now = self.clock.now_s()
-        truth_before = self.field.state()
+        truth_before = self.process.state()
 
         # 1. feasibility (same rule as the firmware loop, see actions.plan_execution)
         baseline_j = cfg.mcu.baseline_power_w * dt
@@ -217,7 +225,9 @@ class EdgeEngineAwareEnv(gym.Env):
         # 5. world update -----------------------------------------------------
         self.clock.advance()
         t_next = self.clock.now_s()
-        truth_after = self.field.step(now)  # dynamics over [now, now + dt]
+        if self.schedule is not None:
+            self.schedule.step()  # within-day perturbation of the activity level
+        truth_after = self.process.step(now)  # dynamics over [now, now + dt]
         self.source.update(t_next)
         self.radio.update_channel()
         self.application.step(t_next, truth_after)
@@ -311,12 +321,20 @@ class EdgeEngineAwareEnv(gym.Env):
     # ------------------------------------------------------------------
     def ground_truth(self) -> dict[str, Any]:
         """Simulator-only state. Never feed this to a policy."""
-        fs = self.field.state()
+        fs = self.process.state()
+        aux = dict(fs.aux)
         return {
             "time_s": self.clock.now_s(),
-            "soil_moisture": fs.soil_moisture,
-            "air_temperature_c": fs.air_temperature_c,
-            "relative_humidity": fs.relative_humidity,
+            "domain": self.cfg.domain,
+            "value": fs.value,  # normalised monitored quantity
+            "physical_value": self.quantity.to_physical(fs.value),
+            "quantity_name": self.quantity.name,
+            "quantity_unit": self.quantity.unit,
+            "soil_moisture": fs.value,  # legacy name of the normalised value
+            "air_temperature_c": aux.get("air_temperature_c", aux.get("temperature_c")),  # None when the domain has none
+            "relative_humidity": aux.get("relative_humidity"),
+            "activity": self.schedule.level(self.clock.now_s()) if self.schedule is not None else None,
+            "process": aux,
             "zone": fs.zone,
             "event_occurred": fs.event_occurred,
             "harvest_power_true_w": self.source.true_power_w(),
@@ -406,7 +424,7 @@ class EdgeEngineAwareEnv(gym.Env):
             soc=self.storage.soc(),
             harvest_power_w=self._last_measured_harvest_w,
             harvested_energy_j=self._last_harvested_j,
-            true_moisture=truth.soil_moisture,
+            true_moisture=truth.value,
             measured_moisture=meas.value if meas is not None else math.nan,
             app_moisture=app_pkt.measurement.value if app_pkt is not None else math.nan,
             sensing_level=int(sensing_level),
@@ -418,6 +436,6 @@ class EdgeEngineAwareEnv(gym.Env):
             priority=int(self.application.priority()),
             reward=reward,
             utility=utility,
-            temperature_c=truth.air_temperature_c,
-            humidity=truth.relative_humidity,
+            temperature_c=truth.aux.get("air_temperature_c", truth.aux.get("temperature_c", math.nan)),
+            humidity=truth.aux.get("relative_humidity", truth.aux.get("occupancy", truth.aux.get("load", math.nan))),
         )

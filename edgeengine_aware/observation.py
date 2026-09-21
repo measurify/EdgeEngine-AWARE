@@ -71,6 +71,11 @@ class NodeProfile:
     ack_available: bool = True
     """Whether uplinks are confirmed (see CommunicationConfig.ack_available)."""
 
+    critical_is_upper: bool = False
+    """Side of the danger: False = the monitored quantity is critical when *low*
+    (soil moisture), True = when *high* (CO2, temperature). Read by the
+    importance indicator; the thresholds are in normalised units."""
+
     observation: ObservationConfig = field(default_factory=ObservationConfig)
 
     @classmethod
@@ -82,12 +87,13 @@ class NodeProfile:
             tx_power_dbm=tuple(m.tx_power_dbm for m in cfg.communication.modes),
             sensitivity_dbm=tuple(m.sensitivity_dbm for m in cfg.communication.modes),
             reference_mode=cfg.communication.reference_mode,
-            warning_threshold=cfg.agriculture.warning_threshold,
-            critical_threshold=cfg.agriculture.critical_threshold,
+            warning_threshold=cfg.quantity.warning_threshold,
+            critical_threshold=cfg.quantity.critical_threshold,
             timestep_s=cfg.time.timestep_s,
             baseline_power_w=cfg.mcu.baseline_power_w,
             reserve_soc=cfg.storage.reserve_soc,
             ack_available=cfg.communication.ack_available,
+            critical_is_upper=cfg.quantity.critical_is_upper,
             observation=cfg.observation,
         )
 
@@ -371,7 +377,7 @@ OBSERVATION_FIELDS: tuple[ObservationField, ...] = (
     ObservationField("app_info_age", "Node-side estimate of the information age at the application", "age / age_scale_s, clipped to 1 (1 if none)", "timer + radio ACK"),
     ObservationField("reported_value", "Value in the last acknowledged uplink (0 if none)", "moisture units", "RAM"),
     ObservationField("app_priority", "Priority requested by the application", "priority / 2", "downlink message"),
-    ObservationField("importance", "Node-side importance of the stored measurement (proximity to thresholds)", "exp(-dist/importance_scale), 1 below critical, 0 if none", "computed in firmware from flash thresholds"),
+    ObservationField("importance", "Node-side importance of the stored measurement (proximity to thresholds)", "exp(-dist/importance_scale), 1 at/beyond critical (side given by critical_is_upper), 0 if none", "computed in firmware from flash thresholds"),
     ObservationField("link_quality", "EWMA of recent ACK outcomes", "already in [0, 1]", "radio ACK"),
     ObservationField("path_loss_est", "Path-loss estimate from the margin of the last ACK (mode independent)", "(PL - path_loss_min_db) / (path_loss_max_db - path_loss_min_db), clipped; 1 if none", "radio ACK SNR/RSSI + flash link-budget table"),
     ObservationField("sense_low_cost", "Energy of a low-cost sensing operation", "E / E_max, clipped to 1", "hardware profile"),
@@ -428,7 +434,8 @@ class ObservationBuilder:
         if not has_measurement:
             return 0.0
         p = self.profile
-        if value <= p.critical_threshold:
+        beyond = value >= p.critical_threshold if p.critical_is_upper else value <= p.critical_threshold
+        if beyond:
             return 1.0
         dist = min(abs(value - p.warning_threshold), abs(value - p.critical_threshold))
         return math.exp(-dist / p.observation.importance_scale)

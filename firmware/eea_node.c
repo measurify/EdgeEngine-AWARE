@@ -150,7 +150,8 @@ void eea_tracker_state(const eea_tracker_t *t, eea_node_state_t *s) {
 /* ObservationBuilder.importance */
 static eea_real eea_importance(const eea_profile_t *p, eea_real value, bool has_measurement) {
     if (!has_measurement) return 0.0;
-    if (value <= p->critical_threshold) return 1.0;
+    const bool beyond = p->critical_is_upper ? (value >= p->critical_threshold) : (value <= p->critical_threshold);
+    if (beyond) return 1.0;
     const eea_real dist = eea_min(fabs(value - p->warning_threshold), fabs(value - p->critical_threshold));
     return exp(-dist / p->importance_scale);
 }

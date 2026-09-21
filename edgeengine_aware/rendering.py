@@ -40,11 +40,13 @@ def text_dashboard(env: "EdgeEngineAwareEnv") -> str:
     meas = f"{ns.measurement_value:.3f}" if ns.has_measurement else "  n/a"
     app = f"{gt['app_last_value']:.3f}" if gt["app_last_value"] is not None else "  n/a"
     day, hour = env.clock.day_index(), env.clock.hour_of_day()
+    q = env.quantity
+    activity = f"   activity {gt['activity']:.2f}" if gt.get("activity") is not None else ""
     lines = [
-        f"EdgeEngine AWARE | step {env._step_count:4d} | day {day} {int(hour):02d}:{int((hour % 1) * 60):02d}",
+        f"EdgeEngine AWARE [{env.cfg.domain}] | step {env._step_count:4d} | day {day} {int(hour):02d}:{int((hour % 1) * 60):02d}{activity}",
         f"  battery SoC        : {ns.soc():6.1%}   ({ns.stored_energy_j:7.1f} J / {ns.capacity_j:.0f} J)",
-        f"  harvest (meas/true): {ns.harvest_power_w*1e3:6.2f} / {gt['harvest_power_true_w']*1e3:6.2f} mW   recent {ns.harvest_power_recent_w*1e3:.2f} mW   last step {env._last_harvested_j:.2f} J",
-        f"  soil moisture      : true {gt['soil_moisture']:.3f} | node {meas} (age {ns.measurement_age_s/3600:.1f} h) | app {app} (AoI {gt['app_aoi_s']/3600:.1f} h)",
+        f"  harvest (meas/true): {ns.harvest_power_w*1e3:6.3f} / {gt['harvest_power_true_w']*1e3:6.3f} mW   recent {ns.harvest_power_recent_w*1e3:.3f} mW   last step {env._last_harvested_j:.3f} J",
+        f"  {q.name[:19]:19s}: true {gt['value']:.3f} ({gt['physical_value']:.0f} {q.unit[:12]}) | node {meas} (age {ns.measurement_age_s/3600:.1f} h) | app {app} (AoI {gt['app_aoi_s']/3600:.1f} h)",
         f"  zone / priority    : {('normal','warning','CRITICAL')[gt['zone']]} / {PRIORITY_NAMES[gt['app_priority']]}   path loss {gt['path_loss_db']:.0f} dB (node est. {ns.path_loss_est_db:.0f} dB)",
         f"  action             : sense={SENSE_NAMES[last['sensing_level']]}  tx={tx}",
         f"  reward             : {last['reward']:+.3f}   (utility {last['utility']:.3f})",
@@ -107,18 +109,19 @@ class DashboardRenderer:
         # harvest
         ax = axes[0, 1]
         ax.plot(t, step_series(log.harvest_power_w) * 1e3, color="tab:orange", lw=0.9)
-        ax.set_title("Measured harvesting power [mW]")
+        ax.set_title(f"Measured harvesting power [mW] ({cfg.harvesting_source})")
 
-        # moisture
+        # monitored quantity
+        q = env.quantity
         ax = axes[1, 0]
         ax.plot(t, step_series(log.true_moisture), color="k", lw=1.0, label="true")
         ax.plot(t, step_series(log.measured_moisture), color="tab:green", lw=0.9, label="node", drawstyle="steps-post")
         ax.plot(t, step_series(log.app_moisture), color="tab:purple", lw=0.9, label="application", drawstyle="steps-post")
-        ax.axhline(cfg.agriculture.warning_threshold, color="tab:orange", ls=":", lw=0.8)
-        ax.axhline(cfg.agriculture.critical_threshold, color="tab:red", ls=":", lw=0.8)
+        ax.axhline(q.warning_threshold, color="tab:orange", ls=":", lw=0.8)
+        ax.axhline(q.critical_threshold, color="tab:red", ls=":", lw=0.8)
         ax.set_ylim(0, 1)
         ax.legend(loc="upper right", fontsize=7, ncol=3)
-        ax.set_title("Soil moisture (true / node / application)")
+        ax.set_title(f"{q.name} (true / node / application), normalised; danger {'above' if q.critical_is_upper else 'below'} the dotted lines")
 
         # events
         ax = axes[1, 1]

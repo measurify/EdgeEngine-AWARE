@@ -1,11 +1,14 @@
-"""Named evaluation scenarios.
+"""Named evaluation scenarios of the agriculture domain (and the lookup of
+every domain's scenarios by qualified name).
 
 A scenario is a function that returns a fully configured
 :class:`EdgeEngineAwareConfig`. The set below is the *benchmark protocol* of the
 project: policies are compared on every scenario, over a fixed set of seeds,
 with the same metrics. ``default`` is the training distribution; the others
 stress one aspect of the problem so that the value of an adaptive policy
-becomes visible where a fixed duty cycle cannot cope.
+becomes visible where a fixed duty cycle cannot cope. The scenarios of the
+other domains live in ``domains.py`` and are addressed as ``"indoor_air:no_window"``
+or ``"industrial:degrading"`` (``scenario_names("all")`` lists everything).
 
 Scenario                what is stressed                            what a good policy does
 ----------------------  ------------------------------------------  --------------------------------------------
@@ -87,10 +90,42 @@ SCENARIOS: dict[str, Callable[[], EdgeEngineAwareConfig]] = {
 }
 
 
+def split_scenario_name(name: str) -> tuple[str, str]:
+    """``"indoor_air:no_window"`` -> ``("indoor_air", "no_window")``; a bare name is agricultural."""
+    if ":" in name:
+        domain, scen = name.split(":", 1)
+        return domain, scen
+    return "agriculture", name
+
+
+def scenario_names(domain: str = "agriculture") -> list[str]:
+    """Qualified names (``domain:scenario``) of the benchmark scenarios of ``domain``,
+    or of every domain with ``domain="all"``. Agricultural names are returned bare
+    for backwards compatibility."""
+    from .domains import DOMAIN_NAMES, domain_scenarios  # local import (domains.py imports SCENARIOS)
+
+    if domain == "all":
+        return [n for d in DOMAIN_NAMES for n in scenario_names(d)]
+    if domain == "agriculture":
+        return list(SCENARIOS)
+    return [f"{domain}:{s}" for s in domain_scenarios(domain)]
+
+
 def get_scenario(name: str, *, randomize: bool = False) -> EdgeEngineAwareConfig:
-    """Return a fresh configuration for ``name`` (see :data:`SCENARIOS`)."""
-    if name not in SCENARIOS:
-        raise KeyError(f"unknown scenario {name!r}; available: {sorted(SCENARIOS)}")
-    cfg = SCENARIOS[name]()
+    """Return a fresh configuration for ``name``.
+
+    ``name`` is an agricultural scenario (see :data:`SCENARIOS`) or a qualified
+    ``domain:scenario`` of another domain, e.g. ``"industrial:degrading"``
+    (see ``domains.DOMAINS``).
+    """
+    from .domains import DOMAIN_NAMES, domain_scenarios  # local import (domains.py imports SCENARIOS)
+
+    domain, scen = split_scenario_name(name)
+    if domain not in DOMAIN_NAMES:
+        raise KeyError(f"unknown domain {domain!r} in scenario {name!r}; available: {DOMAIN_NAMES}")
+    table = domain_scenarios(domain)
+    if scen not in table:
+        raise KeyError(f"unknown scenario {name!r}; available in {domain}: {sorted(table)}")
+    cfg = table[scen]()
     cfg.randomization.enabled = randomize
     return cfg

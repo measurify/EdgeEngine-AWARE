@@ -4,11 +4,14 @@
 Energy-Harvesting Edge IoT Systems**
 
 EdgeEngine AWARE is a Python simulator, packaged as a standard
-[Gymnasium](https://gymnasium.farama.org/) environment, of a small solar-powered sensor
-node that monitors soil moisture in a field and reports to a remote application over a
-long-range, low-power radio link (LoRa-like). It exists to **train and compare decision
-policies** — hand-written rules or reinforcement-learning (RL) agents — that decide, every
-15 minutes, how to spend a very small and uncertain energy budget.
+[Gymnasium](https://gymnasium.farama.org/) environment, of a small **energy-harvesting
+embedded node** that monitors a physical quantity and reports it to a remote application over
+a low-power radio link. It exists to **train and compare decision policies** — hand-written
+rules or reinforcement-learning (RL) agents — that decide, every 15 minutes, how to spend a
+very small and uncertain energy budget. Three application domains are built in: a
+solar-powered soil-moisture node in a field (the reference case used throughout this README),
+a CO₂ node in a classroom powered by the ceiling lights, and a machine-monitoring node powered
+by the heat of the motor it watches (§10).
 
 The project also contains what is needed *after* training: a frozen export format for
 policies, a firmware-style controller, a C runtime that reproduces the Python decision
@@ -32,15 +35,16 @@ hardware or radio engineering. Terms in *italics* on first use are defined in th
 7. [Configuration, scenarios and domain randomisation](#7-configuration-scenarios-and-domain-randomisation)
 8. [Built-in policies](#8-built-in-policies)
 9. [Training and comparing RL agents](#9-training-and-comparing-rl-agents)
-10. [Recorded traces instead of models](#10-recorded-traces-instead-of-models)
-11. [From simulation to a microcontroller](#11-from-simulation-to-a-microcontroller)
-12. [Notebooks, scripts and tools](#12-notebooks-scripts-and-tools)
-13. [Repository layout](#13-repository-layout)
-14. [Tests](#14-tests)
-15. [Documentation](#15-documentation)
-16. [What is not modelled](#16-what-is-not-modelled)
-17. [Glossary](#glossary)
-18. [Citation](#citation)
+10. [Three application domains](#10-three-application-domains)
+11. [Recorded traces instead of models](#11-recorded-traces-instead-of-models)
+12. [From simulation to a microcontroller](#12-from-simulation-to-a-microcontroller)
+13. [Notebooks, scripts and tools](#13-notebooks-scripts-and-tools)
+14. [Repository layout](#14-repository-layout)
+15. [Tests](#15-tests)
+16. [Documentation](#16-documentation)
+17. [What is not modelled](#17-what-is-not-modelled)
+18. [Glossary](#glossary)
+19. [Citation](#citation)
 
 ---
 
@@ -104,7 +108,7 @@ cd EdgeEngine-AWARE
 python -m venv .venv && source .venv/bin/activate   # optional but recommended
 pip install -e ".[dev]"      # numpy, gymnasium, matplotlib + pytest, jupyter, nbformat, nbconvert
 pip install -e ".[rl]"       # only for RL training: stable-baselines3, sb3-contrib, torch (CPU is enough)
-pytest                       # 83 tests, 10-60 s depending on the installed extras
+pytest                       # 129 tests, 15-60 s depending on the installed extras
 ```
 
 The `-e` flag installs the package in "editable" mode: edits to the source are picked up
@@ -364,7 +368,7 @@ print(summarize(rows, "reward"))     # {scenario: {policy: (mean, std)}}
 scenarios with nominal (non-randomised) physics, seeds ≥ 1000 that training never uses; one
 `EvalRow` per episode with reward, utility, energy, counts, min SoC, brown-outs, AoI and the
 reward components. `evaluate(..., envs={label: env})` evaluates on ready-made environments
-instead (e.g. trace-driven ones, §10).
+instead (e.g. trace-driven ones, §11, or other domains, §10).
 
 **What we found** (`examples/train_rl.ipynb`, details in the notebook): with 1–2 M training
 steps PPO learns a sensible policy — including using the robust radio mode when the link is
@@ -378,7 +382,44 @@ budget tried, with a higher variance across seeds, and wastes uplinks in the fas
 memory (4-frame stacking or a recurrent PPO) does not help. Repeating training over several
 seeds (`examples/train_seeds.py`) gives the mean ± std that a paper should quote.
 
-## 10. Recorded traces instead of models
+## 10. Three application domains
+
+The agricultural node is one instance of a general problem: an embedded node with a small
+energy store, a harvester and a duty to report. `edgeengine_aware.domains` makes the hidden
+world pluggable and ships three domains. Whatever the domain, the node sees the **same
+18-number observation** and returns the **same action**: the monitored quantity is normalised
+to [0, 1], and the only new profile constant is on which side the danger lies
+(`critical_is_upper`). The rule-based controller, the RL tooling, the exported bundles and the
+C runtime therefore work unchanged in every domain — and a policy trained in one domain can be
+evaluated in another.
+
+| domain | monitored quantity (danger) | energy source | radio | storage / always-on | what drives the week |
+|---|---|---|---|---|---|
+| `agriculture` | soil moisture (low) | solar cell, weather | LoRa-like, 3 spreading factors | 300 J / 200 µW | sun, clouds, rain, irrigation |
+| `indoor_air` | CO₂ of a classroom (high: 1000 / 1500 ppm) | indoor PV under the ceiling lights, plus a window | BLE-like, 3 PHY modes, sub-millijoule uplinks | 60 J / 20 µW | occupancy 08–18 on weekdays: people raise the CO₂ *and* switch the lights on; nights and weekends bring neither energy nor relevance; the CO₂ sensor (20 / 150 mJ per reading) is the energy hog |
+| `industrial` | bearing temperature of a motor (high: 70 / 90 °C) | thermoelectric generator on the warm casing | LoRa-like | 120 J / 200 µW | two shifts 06–22 on weekdays: the machine's heat is both the energy source and the monitored variable; faults make it run hotter until maintenance; weekends are cold and dark |
+
+```python
+import edgeengine_aware as ea
+from edgeengine_aware.rl import make_env
+
+env = ea.EdgeEngineAwareEnv(ea.domain_config("industrial"))      # a domain's default configuration
+env = make_env("indoor_air:no_window")                          # a scenario of another domain ("domain:scenario")
+env = make_env("all")                                           # training mixture over every scenario of every domain
+print(ea.scenario_names("all"))                                 # 6 agricultural + 5 + 5 scenarios
+```
+
+Each domain has its own stress scenarios (`indoor_air`: `no_window`, `weak_ventilation`,
+`long_hours`, `dim_lights`; `industrial`: `single_shift`, `degrading`, `continuous`,
+`weak_link`). `examples/domains.ipynb` puts the three side by side and asks the cross-domain
+question. First answer: the 5 M-step PPO trained on the agricultural scenarios is at parity
+with the rule-based controller in its own domain but **loses 21 points on the industrial and
+33 on the indoor domain** — it learned the solar day, not only the trade-off.
+`examples/run_cross_domain.sh` trains one policy per domain and a *universal* one on the
+mixture of all three; the notebook builds the train-domain × test-domain matrix from those
+runs. Models and constants of the two new domains: `docs/modeling.md` §6.
+
+## 11. Recorded traces instead of models
 
 The weather and soil dynamics of the simulator are *stochastic models*. To check a policy
 against data those models never produced, `edgeengine_aware.traces` replays recorded hourly
@@ -422,7 +463,7 @@ PPO policies trained on the synthetic mixture behave as on the synthetic scenari
 while sending fewer packets — with no brown-outs in winter; on the darker synthetic trace the
 2 M policy fails in winter, the regime the training scenarios do not contain.
 
-## 11. From simulation to a microcontroller
+## 12. From simulation to a microcontroller
 
 Three pieces make a trained policy deployable:
 
@@ -457,7 +498,7 @@ cc -std=c99 -O2 -I firmware firmware/eea_node.c firmware/main_example.c -lm -o n
 Details, the field-evaluation workflow and the alternatives (TensorFlow Lite Micro, CMSIS-NN):
 `docs/deployment.md`, `firmware/README.md`.
 
-## 12. Notebooks, scripts and tools
+## 13. Notebooks, scripts and tools
 
 The notebooks are **generated** by the `examples/build_*.py` scripts (edit the script, not the
 notebook, then run it and execute the notebook).
@@ -467,9 +508,11 @@ notebook, then run it and execute the notebook).
 | `examples/baseline_policy.ipynb` | guided tour: environment, one episode step by step, dashboard, metrics, baseline comparison over scenarios | < 1 min |
 | `examples/train_rl.ipynb` | the RL experiment: protocol, baselines, PPO and DQN training, learning curves, comparison, behaviour analysis, export check, multi-seed study, memory study | `EEA_BUDGET=quick` ~3 min (smoke test), `default` ~30–40 min + ~1.5 h for the seed study, `paper` longer |
 | `examples/trace_driven.ipynb` | the simulator on recorded traces: seasons, model-vs-trace statistics, policies per season, replayed weeks | ~1 min |
+| `examples/domains.ipynb` | the three domains side by side: energy budgets, one week each, baselines on all 16 scenarios, cross-domain transfer of PPO policies | ~3 min |
 | `examples/compare_policies.py` | headless baseline comparison (`--seeds`, `--randomize`, `--days`) | seconds |
-| `examples/train_seeds.py` | train and evaluate one (algorithm, seed) pair: `--algo ppo|dqn|ppo_stack|rppo --seed N --steps ... --out DIR`; writes a JSON with the evaluation rows and learning curve, the checkpoints and (PPO/DQN) the exported bundle | 20–60 min per run |
-| `examples/run_long_training.sh` | chains the long runs (PPO 5 M steps × 3 seeds, DQN 2 M × 3) into `examples/rl_runs/seeds_long/`, creating `.venv` with the RL extras if needed; resumable, keeps a macOS laptop awake | 3–5 h |
+| `examples/train_seeds.py` | train and evaluate one (algorithm, seed) pair: `--algo ppo|dqn|ppo_stack|rppo --seed N --steps ... --domain agriculture|indoor_air|industrial|all --eval-domain ... --out DIR`; writes a JSON with the evaluation rows and learning curve, the checkpoints and (PPO/DQN) the exported bundle | 20–60 min per run |
+| `examples/run_long_training.sh` | chains the long runs (PPO 5 M steps × 3 seeds, DQN 2 M × 3) into `examples/rl_runs/seeds_long/`, creating `.venv` with the RL extras if needed; resumable, keeps a macOS laptop awake | 1–5 h |
+| `examples/run_cross_domain.sh` | PPO 5 M × 2 seeds trained on each domain and on the mixture of all, evaluated on every domain → `examples/rl_runs/seeds_domains/` (read by `domains.ipynb` §4b) | ~2 h |
 | `tools/fetch_open_meteo.py` | download an hourly ERA5/ERA5-Land trace (`--lat --lon --start --end --utc-offset --site --out`) | seconds |
 | `tools/make_demo_trace.py` | regenerate the synthetic demo trace (`--year --seed --out`) | seconds |
 | `tools/export_c.py` | `PolicyBundle` JSON → `eea_policy_data.h` (`-o`) | instant |
@@ -477,7 +520,7 @@ notebook, then run it and execute the notebook).
 Trained models and evaluation caches go to `examples/rl_runs/` (ignored by git; set
 `EEA_RETRAIN=1` to force retraining).
 
-## 13. Repository layout
+## 14. Repository layout
 
 ```
 edgeengine_aware/           the package
@@ -488,7 +531,7 @@ edgeengine_aware/           the package
                             ObservationBuilder (the 18-vector) - the sim-to-real contract
   actions.py                action encoding, flat index, plan_execution (feasibility rule)
   energy.py                 SimulatedClock, SimulatedEnergyStorage, SolarEnergySource (stochastic solar model)
-  agriculture.py            FieldEnvironment: hidden soil / weather ground truth
+  agriculture.py            FieldEnvironment: hidden soil / weather ground truth of the agriculture domain
   sensing.py                SimulatedSoilMoistureSensor
   communication.py          SimulatedLoRaRadio: radio modes, link-budget channel with slow and fast fading, ACK + margin
   application.py            RemoteMonitoringApplication: utility of the delivered information, priority requests
@@ -497,7 +540,11 @@ edgeengine_aware/           the package
   env.py                    EdgeEngineAwareEnv (gymnasium.Env)
   rendering.py              Matplotlib dashboard (human / rgb_array) and text dashboard (ansi)
   policies.py               RuleBasedPolicy, PeriodicPolicy, RandomPolicy, AlwaysOnPolicy, run_episode
-  scenarios.py              the six benchmark scenarios
+  scenarios.py              the six agricultural benchmark scenarios; lookup of every domain's scenarios by "domain:name"
+  domains.py                the three domains: default configurations, their scenarios, the world factory (build_world)
+  process.py                ProcessState (what every monitored process reports) and the weekly ActivitySchedule
+  indoor.py                 indoor_air domain: CO2 mass balance of a room, indoor-light PV source
+  industrial.py             industrial domain: bearing thermal model with wear/faults/maintenance, thermoelectric source
   rl.py                     FlatActionWrapper, MixedScenarioEnv, make_env, SB3Policy, evaluate / summarize,
                             export_sb3_mlp, NumpyMLPPolicy, FrameStacker / StackedPolicy
   traces.py                 Trace, TraceSolarEnergySource, TraceFieldEnvironment, TraceDrivenEnv
@@ -510,9 +557,9 @@ tests/                      pytest suite (see below)
 docs/                       detailed documentation (see below)
 ```
 
-## 14. Tests
+## 15. Tests
 
-`pytest` runs 83 tests:
+`pytest` runs 129 tests:
 
 | file | what it checks |
 |---|---|
@@ -522,9 +569,10 @@ docs/                       detailed documentation (see below)
 | `test_deployment.py` | protocols, mock backend, controller vs simulator observation equality, bundle export |
 | `test_rl.py` | scenarios, wrappers, evaluation protocol, numpy MLP runtime vs SB3, rule-based radio-mode choice |
 | `test_traces.py` | trace loader semantics (interpolation, interval means, CSV round trip), trace-driven backends and environment |
-| `test_firmware.py` | C runtime vs Python (compiles `firmware/` with the system C compiler; skipped if none) |
+| `test_firmware.py` | C runtime vs Python for the three domain profiles (compiles `firmware/` with the system C compiler; skipped if none) |
+| `test_domains.py` | threshold direction, weekly schedule, CO₂ and bearing models, TEG coupling, shared spaces across domains, qualified scenario names and mixtures, agriculture defaults unchanged |
 
-## 15. Documentation
+## 16. Documentation
 
 | document | content |
 |---|---|
@@ -536,7 +584,7 @@ docs/                       detailed documentation (see below)
 | `firmware/README.md` | the C runtime: API, generated data header, equivalence tests, porting notes |
 | `data/traces/README.md` | the trace CSV format and the shipped/obtainable data |
 
-## 16. What is not modelled
+## 17. What is not modelled
 
 Being explicit about the simplifications matters more than the list of features:
 
@@ -549,6 +597,10 @@ Being explicit about the simplifications matters more than the list of features:
 * **Application**: a rule-based priority (thresholds, information age, random campaigns), not
   a human operator.
 * **Clock**: exact 15-minute steps, no drift or jitter.
+* **Indoor air**: a single well-mixed room with one occupancy schedule; the CO₂ sensor's own
+  warm-up and drift are folded into the two energy/noise levels. **Industrial**: a first-order
+  thermal model with a scalar "health"; vibration is not simulated, the accurate sensing level
+  stands for a vibration burst only through its energy and precision.
 
 `docs/sim_to_real.md` lists, for each of these, what a real device will do differently and
 which mitigation (domain randomisation, configuration, recorded traces) is available.

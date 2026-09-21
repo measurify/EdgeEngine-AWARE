@@ -1,4 +1,4 @@
-"""Simulated soil-moisture sensor.
+"""Simulated scalar sensor (soil moisture, CO2, temperature - any normalised quantity).
 
 The sensor reads the *true* field moisture and returns a noisy measurement
 whose noise level depends on the requested sensing level. A real driver would
@@ -40,3 +40,6 @@ class SimulatedSoilMoistureSensor:
         noise = self._rng.normal(0.0, self.cfg.noise_std[level]) + self.cfg.bias[level]
         value = float(np.clip(truth + noise, 0.0, 1.0))
         return Measurement(value=value, timestamp_s=now_s, level=level, noise_std=self.cfg.noise_std[level])
+
+
+SimulatedScalarSensor = SimulatedSoilMoistureSensor  # domain-neutral name

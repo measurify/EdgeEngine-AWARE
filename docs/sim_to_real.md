@@ -31,7 +31,10 @@ mitigations exist.
 
 Every backend produces the same kind of *measurable readings* (stored energy, harvested
 power, a sensor value, an ACK, a priority message) and consumes the same kind of *driver
-calls* (read the sensor at level *l*, send the stored reading in mode *k*). In Python these
+calls* (read the sensor at level *l*, send the stored reading in mode *k*). The simulation
+backend itself is pluggable: `domains.build_world` instantiates the monitored process and the
+energy source of the configured domain (soil and sun, a room's CO₂ and its lights, a motor
+bearing and its heat — `docs/modeling.md` §6) behind the same contract. In Python these
 are the six **protocols** of `interfaces.py` — `Clock`, `EnergyStorage`, `EnergySource`,
 `Sensor`, `Radio`, `RemoteApplication` (a `typing.Protocol` is an interface: any class with
 the right methods satisfies it, no inheritance needed).

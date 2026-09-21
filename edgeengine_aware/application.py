@@ -51,8 +51,8 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-from .agriculture import FieldState
-from .config import AgricultureConfig, ApplicationConfig
+from .config import AgricultureConfig, ApplicationConfig, QuantityConfig
+from .process import ProcessState
 from .interfaces import Packet
 from .observation import PRIORITY_ELEVATED, PRIORITY_ROUTINE, PRIORITY_URGENT
 
@@ -87,11 +87,17 @@ class TrackingStatus:
 
 
 class RemoteMonitoringApplication:
-    """Crop water-stress monitoring back-end."""
+    """Monitoring back-end: tracks one normalised quantity with two stress
+    thresholds (``QuantityConfig``: soil moisture, CO2, a bearing temperature...).
 
-    def __init__(self, cfg: ApplicationConfig, agri: AgricultureConfig, timestep_s: float):
+    ``quantity`` may also be an ``AgricultureConfig`` (its thresholds are then
+    read directly), for backwards compatibility.
+    """
+
+    def __init__(self, cfg: ApplicationConfig, quantity: QuantityConfig | AgricultureConfig, timestep_s: float):
         self.cfg = cfg
-        self.agri = agri
+        self.q: QuantityConfig = quantity.quantity() if isinstance(quantity, AgricultureConfig) else quantity
+        self.agri = self.q  # legacy name
         self.dt = timestep_s
         self._rng = np.random.default_rng()
         self.reset(self._rng, start_time_s=0.0)
@@ -128,14 +134,15 @@ class RemoteMonitoringApplication:
         return self._priority
 
     def _compute_priority(self, now_s: float) -> int:
-        c, a = self.cfg, self.agri
+        c = self.cfg
         prio = PRIORITY_ROUTINE
         aoi = self.age_of_information_s(now_s)
         v = self.believed_value
         if v is not None:
-            if v < a.critical_threshold:
+            zone = self.q.zone(v)  # direction-aware (QuantityConfig.critical_is_upper)
+            if zone == 2:
                 prio = PRIORITY_URGENT
-            elif v < a.warning_threshold:
+            elif zone == 1:
                 prio = PRIORITY_ELEVATED
         if aoi > c.aoi_urgent_s:
             prio = PRIORITY_URGENT
@@ -146,7 +153,7 @@ class RemoteMonitoringApplication:
         return prio
 
     # -- dynamics -----------------------------------------------------------
-    def step(self, now_s: float, field_state: FieldState) -> None:
+    def step(self, now_s: float, field_state: ProcessState) -> None:
         """Advance the application clock; register external requests and
         ground-truth events (the latter only for utility evaluation)."""
         c = self.cfg
@@ -174,28 +181,28 @@ class RemoteMonitoringApplication:
         return self._request_until_s is not None
 
     # -- utility (privileged) -----------------------------------------------
-    def criticality(self, true_moisture: float) -> float:
-        a, c = self.agri, self.cfg
-        if true_moisture <= a.critical_threshold:
+    def criticality(self, true_value: float) -> float:
+        q, c = self.q, self.cfg
+        if q.beyond_critical(true_value):
             return 1.0 + c.criticality_gain
-        dist = min(abs(true_moisture - a.warning_threshold), abs(true_moisture - a.critical_threshold))
+        dist = min(abs(true_value - q.warning_threshold), abs(true_value - q.critical_threshold))
         return 1.0 + c.criticality_gain * math.exp(-dist / c.criticality_scale)
 
-    def tracking(self, field_state: FieldState) -> TrackingStatus:
+    def tracking(self, field_state: ProcessState) -> TrackingStatus:
         """Per-step tracking utility of the application's current belief."""
-        crit = self.criticality(field_state.soil_moisture)
+        crit = self.criticality(field_state.value)
         v = self.believed_value
         if v is None:
             return TrackingStatus(0.0, None, 0.0, crit)
-        err = abs(v - field_state.soil_moisture)
+        err = abs(v - field_state.value)
         acc = math.exp(-err / self.cfg.error_scale)
         return TrackingStatus(self.cfg.tracking_weight * crit * acc, err, acc, crit)
 
-    def receive(self, packet: Packet, now_s: float, field_state: FieldState) -> UtilityBreakdown:
+    def receive(self, packet: Packet, now_s: float, field_state: ProcessState) -> UtilityBreakdown:
         """Register a delivered packet and return its bonus utility."""
         c = self.cfg
         m = packet.measurement
-        truth = field_state.soil_moisture
+        truth = field_state.value
 
         err_after = abs(m.value - truth)
         err_before = abs(self.believed_value - truth) if self.believed_value is not None else c.error_scale * 3.0

@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from edgeengine_aware import EdgeEngineAwareEnv, NodeProfile, RuleBasedParams, RuleBasedPolicy, default_config
+from edgeengine_aware import EdgeEngineAwareEnv, NodeProfile, RuleBasedParams, RuleBasedPolicy, default_config, domain_config
 from edgeengine_aware.actions import plan_execution
 from edgeengine_aware.deployment import export_policy
 from edgeengine_aware.interfaces import Measurement, Packet
@@ -97,8 +97,9 @@ def random_event_stream(rng: np.random.Generator, profile: NodeProfile, n_steps:
     for k in range(n_steps):
         tod = now % 86400.0
         cap = 300.0 if k < n_steps // 2 else 250.0
+        cap *= profile.tx_energy_j[profile.reference_mode] / 0.6 if profile.tx_energy_j[profile.reference_mode] < 0.01 else 1.0  # BLE-scale node: small storage
         energy = float(rng.uniform(0, cap))
-        harvest = float(max(0.0, rng.normal(0.002, 0.002)))
+        harvest = float(max(0.0, rng.normal(0.7, 0.7))) * profile.observation.harvest_ref_power_w
         prio = int(rng.integers(0, 3)) if rng.random() < 0.3 else -1
         events.append(("B", (now, tod, energy, cap, harvest, prio)))
         if rng.random() < 0.6:
@@ -156,9 +157,10 @@ def drive(events, tracker: NodeStateTracker, builder: ObservationBuilder, harnes
 # ---------------------------------------------------------------------------
 # fixtures
 # ---------------------------------------------------------------------------
-@pytest.fixture(scope="module")
-def profile() -> NodeProfile:
-    return NodeProfile.from_config(default_config())
+@pytest.fixture(scope="module", params=["agriculture", "indoor_air", "industrial"])
+def profile(request) -> NodeProfile:
+    """The three domain profiles: different energies, radio tables and threshold direction."""
+    return NodeProfile.from_config(domain_config(request.param))
 
 
 @pytest.fixture(scope="module")
@@ -193,6 +195,7 @@ def test_export_header_mentions_bundle(profile):
     assert "EEA_HAS_RULE_PARAMS" in header and "EEA_PROFILE" in header
     assert '#define EEA_BUNDLE_NOTES "unit"' in header
     assert ".n_modes = 3," in header
+    assert f".critical_is_upper = {'true' if profile.critical_is_upper else 'false'}," in header
 
 
 def test_tracker_and_observation_match_bit_for_bit(profile, rule_harness):

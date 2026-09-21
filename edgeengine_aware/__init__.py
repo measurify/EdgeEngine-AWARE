@@ -13,7 +13,7 @@ Quick start::
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from gymnasium.envs.registration import register
 
@@ -38,7 +38,8 @@ from .interfaces import Policy
 from .metrics import EpisodeMetrics
 from .observation import OBSERVATION_FIELDS, NodeProfile, NodeState, ObservationBuilder
 from .policies import AlwaysOnPolicy, PeriodicPolicy, RandomPolicy, RuleBasedParams, RuleBasedPolicy, run_episode
-from .scenarios import SCENARIOS, get_scenario
+from .domains import DOMAINS, DOMAIN_NAMES, domain_config
+from .scenarios import SCENARIOS, get_scenario, scenario_names
 from .traces import Trace, TraceDrivenEnv
 
 register(
@@ -72,6 +73,10 @@ __all__ = [
     "run_episode",
     "SCENARIOS",
     "get_scenario",
+    "scenario_names",
+    "DOMAINS",
+    "DOMAIN_NAMES",
+    "domain_config",
     "Trace",
     "TraceDrivenEnv",
     "EpisodeMetrics",

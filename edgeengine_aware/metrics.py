@@ -103,7 +103,7 @@ class EpisodeLog:
     soc: list[float] = field(default_factory=list)
     harvest_power_w: list[float] = field(default_factory=list)
     harvested_energy_j: list[float] = field(default_factory=list)
-    true_moisture: list[float] = field(default_factory=list)
+    true_moisture: list[float] = field(default_factory=list)  # normalised monitored quantity (any domain)
     measured_moisture: list[float] = field(default_factory=list)  # nan when no measurement stored
     app_moisture: list[float] = field(default_factory=list)  # nan when nothing received yet
     sensing_level: list[int] = field(default_factory=list)
@@ -115,12 +115,17 @@ class EpisodeLog:
     priority: list[int] = field(default_factory=list)
     reward: list[float] = field(default_factory=list)
     utility: list[float] = field(default_factory=list)
-    temperature_c: list[float] = field(default_factory=list)
-    humidity: list[float] = field(default_factory=list)
+    temperature_c: list[float] = field(default_factory=list)  # domain extra (air / bearing temperature)
+    humidity: list[float] = field(default_factory=list)  # domain extra (humidity / occupancy / load)
 
     def append(self, **kwargs) -> None:
         for k, v in kwargs.items():
             getattr(self, k).append(v)
+
+    @property
+    def true_value(self) -> list[float]:
+        """Normalised monitored quantity (``true_moisture`` is the historical name)."""
+        return self.true_moisture
 
     def __len__(self) -> int:
         return len(self.time_s)
