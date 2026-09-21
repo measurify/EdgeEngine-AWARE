@@ -42,6 +42,8 @@ What it does:
    mean ± std *across runs*, which is the number a paper should quote;
 9. tests whether **memory** helps on this POMDP: PPO with 4-frame stacking and a recurrent
    PPO (LSTM) against the memoryless PPO.
+10. reads the **long runs** (PPO 5 M × 3 seeds, DQN 2 M × 3, produced by
+    `examples/run_long_training.sh`) and asks whether training time closes the gap to the rule.
 
 > **Runtime.** With the default budget (`BUDGET = "default"`: 2 M PPO steps, 1 M DQN steps,
 > 20 evaluation seeds) the notebook takes roughly 30–40 minutes on a laptop CPU (measured:
@@ -785,8 +787,78 @@ if "ppo_stack" in RUNS:
     print(f"stacked policy: input dim {w_stack['input_dim']}, numpy runtime agrees on {agree}/{total} observations")
 """)
 
+
 md(r"""
-## 10. Reading the results
+## 10. Does longer training close the gap?
+
+Sections 3–9 use 1 M steps for PPO and 0.5 M for DQN (the default budget). The learning curves
+were still rising, so the natural question is whether the ~5-point deficit to the rule-based
+controller is a matter of training time. `examples/run_long_training.sh` chains
+`train_seeds.py` runs of **5 M steps (PPO) and 2 M steps (DQN), three seeds each**, on the
+same mixture, into `examples/rl_runs/seeds_long/` (about one hour on a recent laptop). The
+cells below read those files when they exist and put them next to the short runs of section 8
+and the rule-based controller, on the same held-out seeds.
+""")
+
+code(r"""
+LONG_DIR = OUT / "seeds_long"
+LONG = {}
+for f in sorted(LONG_DIR.glob("*_seed*.json")) if LONG_DIR.exists() else []:
+    if "bundle" in f.name:
+        continue
+    d = json.loads(f.read_text()); LONG.setdefault(d["algo"], []).append(d)
+if not LONG:
+    print("no long runs found — run  bash examples/run_long_training.sh  and re-execute this section")
+else:
+    print({ALGO_LABEL[a]: f"{len(v)} runs x {v[0]['steps']:,} steps, {np.mean([d['train_seconds'] for d in v])/60:.0f} min each" for a, v in LONG.items()})
+    PL = per_run_scenario_means(LONG)
+    cols = [(f"PPO {RUNS['ppo'][0]['steps']/1e6:.0f}M", PR["ppo"]), (f"PPO {LONG['ppo'][0]['steps']/1e6:.0f}M", PL["ppo"])]
+    if "dqn" in RUNS and "dqn" in LONG:
+        cols += [(f"DQN {RUNS['dqn'][0]['steps']/1e6:.1f}M", PR["dqn"]), (f"DQN {LONG['dqn'][0]['steps']/1e6:.0f}M", PL["dqn"])]
+    print(f"\n{'scenario':24s}{'rule-based':>12s}" + "".join(f"{c:>20s}" for c, _ in cols))
+    for scen in scen_names:
+        line = f"{scen:24s}{base_summ[scen]['rule-based'][0]:12.1f}"
+        for _, tab in cols:
+            v = tab[scen]; line += f"{np.mean(v):11.1f} ± {np.std(v):4.1f}({len(v)})"
+        print(line)
+    line = f"{'mean over scenarios':24s}{np.mean([base_summ[s]['rule-based'][0] for s in scen_names]):12.1f}"
+    for _, tab in cols:
+        per_seed = np.mean([tab[s] for s in scen_names], axis=0); line += f"{per_seed.mean():11.1f} ± {per_seed.std():4.1f}({len(per_seed)})"
+    print(line)
+""")
+
+code(r"""
+if LONG:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.2))
+    # left: learning curves of the long PPO runs, with the short runs for scale
+    ax = axes[0]
+    for d in RUNS["ppo"]:
+        ax.plot(d["curve"]["timesteps"], d["curve"]["mean"], color=COLOR["PPO"], lw=0.7, alpha=0.3)
+    for k, d in enumerate(LONG["ppo"]):
+        ax.plot(d["curve"]["timesteps"], d["curve"]["mean"], color=PALETTE[6], lw=1.0, alpha=0.8, label="PPO 5M (per seed)" if k == 0 else None)
+    L = min(len(d["curve"]["mean"]) for d in LONG["ppo"])
+    ax.plot(LONG["ppo"][0]["curve"]["timesteps"][:L], np.mean([d["curve"]["mean"][:L] for d in LONG["ppo"]], axis=0), color=PALETTE[6], lw=2.6, label="PPO 5M (mean)")
+    ax.plot([], [], color=COLOR["PPO"], lw=0.7, alpha=0.5, label=f"PPO {RUNS['ppo'][0]['steps']/1e6:.0f}M runs (section 8)")
+    for name in ("rule-based", "periodic 3h"):
+        ax.axhline(ref[name][0], color=COLOR[name], lw=1.1, ls="--", label=name)
+    ax.set_ylim(-50, None); ax.legend(loc="lower right", fontsize=8)
+    tidy(ax, "Greedy reward on the training mixture during training", "environment steps", "episode reward")
+    # right: per-scenario advantage over the rule-based controller, short vs long
+    ax = axes[1]
+    x = np.arange(len(scen_names)); w = 0.38
+    for j, (label, tab, color) in enumerate([(cols[0][0], PR["ppo"], COLOR["PPO"]), (cols[1][0], PL["ppo"], PALETTE[6])]):
+        adv = np.array([np.mean(tab[s]) - base_summ[s]["rule-based"][0] for s in scen_names])
+        err = np.array([np.std(tab[s]) for s in scen_names])
+        ax.bar(x + (j - 0.5) * w, adv, width=w, yerr=err, capsize=2, color=color, label=label)
+    ax.axhline(0, color="k", lw=0.8)
+    ax.set_xticks(x); ax.set_xticklabels([s.replace("_", "\n") for s in scen_names], fontsize=8)
+    ax.legend(fontsize=8); ax.grid(axis="x", visible=False)
+    tidy(ax, "Reward minus rule-based, mean ± std across training seeds", None, "advantage over rule-based")
+    plt.tight_layout(); plt.show()
+""")
+
+md(r"""
+## 11. Reading the results
 
 ### What this run found (default budget, three-mode radio, executed 2026-09-19)
 
@@ -798,16 +870,19 @@ md(r"""
 | Does the learned policy use the radio modes sensibly? | **PPO yes**: standard mode when the estimated path loss is low, robust when it is high, the fast mode almost never. **DQN no**: 60–80 % of its uplinks go out in the fast mode regardless of the link and most are lost. The rule is the most conservative (robust above ~140 dB). |
 | Does memory help? | **No** — frame stacking is 1–9 units below plain PPO everywhere (with a smaller seed variance), the LSTM policy worse still. |
 | Is the export contract sound? | **Yes** — the numpy runtime reproduces every SB3 action for the plain (18 inputs) and the stacked (72 inputs) policy. |
+| Does longer training close the gap? (section 10, runs of 2026-09-20) | **Yes, essentially.** PPO at 5 M steps (three seeds): 78 ± 2 vs 80 on `default`, 77 ± 2 vs 80 on `tiny_battery`, 70 ± 2 vs 73 on `lossy_link`, 76 ± 1 vs 76 on `demanding_application`, and **ahead** on `cloudy_week` (69 ± 5 vs 62) and `drought` (123 ± 1 vs 115); mean over scenarios 82.0 ± 1.8 vs 81.1 for the rule-based controller and 78.3 for PPO at 1 M. The seed spread halves. DQN at 2 M steps does **not** improve (60 ± 2 mean over scenarios, vs 65 at 0.5 M). |
 
-The picture is consistent with the first round: a controller that encodes the physics it is
-given (an energy budget, a link-budget table) is very hard to beat with 1–2 M environment
-steps, and the learned policy earns its keep where the hand-written rules are crudest —
-the energy-limited week. Two levers are left on the table for the learned side: longer
-training (the mode dimension made the problem harder and the curves are still rising), and a
-reward that prices *lost* uplinks explicitly rather than only through energy and staleness.
-On the rule side, the natural next step is to make the margin target depend on the battery
-(accept more link risk when energy is plentiful) — which is precisely the coupling the
-learned policy is exploiting on the cloudy week.
+The picture is consistent with the first round, with one important addition from the long
+runs: a controller that encodes the physics it is given (an energy budget, a link-budget
+table) is very hard to beat with 1–2 M environment steps, but with 5 M steps PPO reaches
+parity on the nominal, small-battery, lossy-link and demanding-application scenarios and
+wins clearly where the hand-written rules are crudest — the energy-limited week and the
+drought. The remaining ~2-point deficits are within the seed spread. The levers still on the
+table: a reward that prices *lost* uplinks explicitly rather than only through energy and
+staleness (the residual gap on `lossy_link`), and, on the rule side, a margin target that
+depends on the battery (accept more link risk when energy is plentiful) — the coupling the
+learned policy exploits on the cloudy week. DQN, in this form, is not competitive at any
+budget tried.
 
 **History.** With the first version of the action space (sensing level × binary transmit,
 single 0.6 J radio mode) five-seed PPO matched the interpretable controller within a few

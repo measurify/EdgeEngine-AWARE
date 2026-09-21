@@ -32,7 +32,7 @@ What this notebook does:
 1. loads a trace and looks at the seasons it contains (harvest, soil moisture, rain);
 2. compares the **statistics** of the trace with those of the synthetic models the
    policies were trained on — where do they agree, where not;
-3. evaluates the **baselines and the trained PPO policy** on the trace, season by season,
+3. evaluates the **baselines and the trained PPO policies** (2 M and 5 M training steps) on the trace, season by season,
    with exactly the same protocol as `train_rl.ipynb` (same metrics, held-out seeds);
 4. shows one replayed week in detail;
 5. summarises what transfers and what does not.
@@ -232,13 +232,16 @@ policies = {
     "periodic 1h": lambda: PeriodicPolicy(period_steps=4, sensing_level=2, tx=2),
     "periodic 3h": lambda: PeriodicPolicy(period_steps=12, sensing_level=2, tx=3),
 }
-bundle_path = next((p for p in [RUNS / "seeds_long" / "ppo_seed0_bundle.json", RUNS / "ppo_default_bundle.json", ROOT / "examples" / "bundles" / "ppo_default.json"] if p.exists()), None)
-if bundle_path is not None:
-    bundle = PolicyBundle.load(bundle_path)
-    policies["PPO (exported)"] = lambda: NumpyMLPPolicy(bundle.model)
-    print("PPO bundle:", bundle_path.relative_to(ROOT), "—", bundle.metadata.get("notes", ""))
-else:
-    print("no PPO bundle found (examples/bundles/ppo_default.json or examples/rl_runs/*) — evaluating the baselines only")
+BUNDLES = ROOT / "examples" / "bundles"
+PPO_NAMES = []
+for label, path in [("PPO 2M", BUNDLES / "ppo_default.json"), ("PPO 5M", BUNDLES / "ppo_long.json")]:
+    if path.exists():
+        b = PolicyBundle.load(path)
+        policies[label] = (lambda m: (lambda: NumpyMLPPolicy(m)))(b.model)
+        PPO_NAMES.append(label)
+        print(f"{label}: {path.relative_to(ROOT)} — {b.metadata.get('notes', '')}")
+if not PPO_NAMES:
+    print("no PPO bundle found in examples/bundles — evaluating the baselines only")
 
 season_days = {"winter": (0, 59), "spring": (59, 151), "summer": (151, 243), "autumn": (243, 334)}
 envs = {}
@@ -338,8 +341,8 @@ def replay_week(policy_factory, start_day, title):
 
 SUMMER_START = 200
 replay_week(policies["rule-based"], SUMMER_START, "Rule-based controller, summer week")
-if "PPO (exported)" in policies:
-    replay_week(policies["PPO (exported)"], SUMMER_START, "PPO policy, same week")
+if PPO_NAMES:
+    replay_week(policies[PPO_NAMES[-1]], SUMMER_START, f"{PPO_NAMES[-1]} policy, same week")
 replay_week(policies["rule-based"], 15, "Rule-based controller, winter week")
 """)
 
@@ -356,10 +359,10 @@ lines = []
 rb_w, rb_s = mean_of("rule-based", "trace winter"), mean_of("rule-based", "trace summer")
 lines.append(f"* Rule-based return: winter {rb_w:.1f} vs summer {rb_s:.1f} (synthetic default {mean_of('rule-based', 'default'):.1f}, cloudy_week {mean_of('rule-based', 'cloudy_week'):.1f}).")
 lines.append(f"* Periodic 1h in winter: min SoC {mean_of('periodic 1h', 'trace winter', 'min_soc'):.2f}, brown-outs {mean_of('periodic 1h', 'trace winter', 'depletions'):.1f} per week — the fixed duty cycle that is fine in summer is not sustainable on winter harvest.")
-if "PPO (exported)" in policies:
+for p in PPO_NAMES:
     for s in ["trace winter", "trace spring", "trace summer", "trace autumn", "default", "cloudy_week"]:
-        d = mean_of("PPO (exported)", s) - mean_of("rule-based", s)
-        lines.append(f"* PPO vs rule-based on {s}: {d:+.1f} return ({mean_of('PPO (exported)', s, 'n_delivered'):.0f} vs {mean_of('rule-based', s, 'n_delivered'):.0f} packets, min SoC {mean_of('PPO (exported)', s, 'min_soc'):.2f} vs {mean_of('rule-based', s, 'min_soc'):.2f}).")
+        d = mean_of(p, s) - mean_of("rule-based", s)
+        lines.append(f"* {p} vs rule-based on {s}: {d:+.1f} return ({mean_of(p, s, 'n_delivered'):.0f} vs {mean_of('rule-based', s, 'n_delivered'):.0f} packets, min SoC {mean_of(p, s, 'min_soc'):.2f} vs {mean_of('rule-based', s, 'min_soc'):.2f}).")
 print("\n".join(lines))
 if IS_DEMO:
     print("\nReminder: these numbers come from the synthetic demo trace. Fetch the archive data to draw conclusions about the site.")
@@ -377,9 +380,10 @@ md(r"""
   always-on load, when a controller must ration *sensing and radio* against a slowly draining
   battery for a week, not for a cloudy day. On the **real Albenga trace** (coastal Liguria,
   January ≈ 18 J/day against a 17 J/day baseline, longest run below the baseline 5 days) the
-  PPO policy trained on the synthetic mixture stays within a few points of the rule-based
-  controller in every season, winter included, with no brown-outs — the same gap it shows on
-  the synthetic scenarios, so the transfer to real weather is clean. On the **darker synthetic
+  PPO policies trained on the synthetic mixture stay within a few points of the rule-based
+  controller in every season, winter included, with no brown-outs — the 2 M-step policy about
+  3 points below, the 5 M-step policy at parity — the same picture as on the synthetic
+  scenarios, so the transfer to real weather is clean. On the **darker synthetic
   demo trace** (January ≈ 10 J/day, runs of 10+ days below the baseline) the same policy loses
   ~28 points in winter and browns out: the synthetic training scenarios do not contain that
   regime. Whether it matters depends on the site — an inland, shaded or more northern

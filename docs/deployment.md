@@ -45,8 +45,9 @@ report which policy it runs. A run-time check that the profile matches the board
 constants is *not* implemented: keep them consistent by generating the header from the same
 bundle that was validated.
 
-Two bundles are shipped in `examples/bundles/`: `rule_based_default.json` and
-`ppo_default.json` (the PPO actor of the RL notebook, 2 M steps, network 18→64→64→7).
+Three bundles are shipped in `examples/bundles/`: `rule_based_default.json`,
+`ppo_default.json` (the PPO actor of the RL notebook, 2 M steps, network 18→64→64→7) and
+`ppo_long.json` (PPO, 5 M steps, seed 1 of `examples/run_long_training.sh`).
 
 ## 2. Sizes
 
@@ -189,6 +190,6 @@ For anything else, the boundary is `Policy.act(obs) -> action` plus the bundle.
 | DQN | `rl.FlatActionWrapper` → `Discrete(12)` | trained and evaluated in the notebook |
 | frame-stacked / recurrent | SB3 `VecFrameStack` (mirrored on the node by `rl.FrameStacker` / `rl.StackedPolicy`) or `RecurrentPPO` (sb3-contrib) | notebook section 9; `examples/train_seeds.py --algo ppo_stack|rppo` |
 | tabular | discretise the 18 inputs with an `ObservationWrapper`, use `flatten_action` | not implemented |
-| **multi-seed protocol** | `examples/train_seeds.py --algo <ppo|dqn|ppo_stack|rppo> --seed N` → JSON with evaluation rows and learning curve; the notebook aggregates mean ± std across runs | notebook section 8 |
+| **multi-seed protocol** | `examples/train_seeds.py --algo <ppo|dqn|ppo_stack|rppo> --seed N` → JSON with evaluation rows, learning curve and (PPO/DQN) the exported bundle; the notebook aggregates mean ± std across runs; `examples/run_long_training.sh` chains the 5 M-step runs | notebook sections 8 and 10 |
 | **evaluation** | `rl.evaluate(policies, scenarios, seeds)` → one `EvalRow` per episode (reward, utility, energies, counts, min SoC, low-battery fraction, brown-outs, mean/max AoI in hours, reward components); `rl.summarize(rows, metric)` → `{scenario: {policy: (mean, std)}}`; `evaluate(policies, envs={label: env})` for ready-made environments such as trace-driven ones | six scenarios, held-out seeds ≥ 1000, deterministic policies, nominal physics |
 | **export check** | `rl.export_sb3_mlp` → bundle `model`; `rl.NumpyMLPPolicy` re-executes it with numpy and must reproduce every SB3 action | notebook and `tests/test_rl.py` |
