@@ -1,5 +1,9 @@
 # EdgeEngine AWARE
 
+[![tests](https://github.com/measurify/EdgeEngine-AWARE/actions/workflows/ci.yml/badge.svg)](https://github.com/measurify/EdgeEngine-AWARE/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/edgeengine-aware.svg)](https://pypi.org/project/edgeengine-aware/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Application- and Energy-Aware Simulation Environment for Reinforcement Learning in
 Energy-Harvesting Edge IoT Systems**
 
@@ -99,7 +103,20 @@ hidden variable and checks that the observation does not move.
 
 ## 3. Installation
 
-Requirements: Python 3.11 or newer. A C compiler (`cc`/`gcc`/`clang`) is optional and only
+Requirements: Python 3.11 or newer.
+
+**To use the environment** (train or evaluate policies in your own code), install it from
+PyPI. The package contains the simulator only — about 100 kB, depending on `numpy`,
+`gymnasium` and `matplotlib`:
+
+```bash
+pip install edgeengine-aware
+pip install "edgeengine-aware[rl]"   # adds stable-baselines3, sb3-contrib, torch (CPU is enough) for RL training
+```
+
+**To work with the repository** (notebooks, weather traces, trained policy bundles, the C
+runtime, the tests), clone it and install in "editable" mode, so that edits to the source
+are picked up without reinstalling. A C compiler (`cc`/`gcc`/`clang`) is optional and only
 needed for the firmware equivalence tests.
 
 ```bash
@@ -107,12 +124,14 @@ git clone https://github.com/measurify/EdgeEngine-AWARE.git
 cd EdgeEngine-AWARE
 python -m venv .venv && source .venv/bin/activate   # optional but recommended
 pip install -e ".[dev]"      # numpy, gymnasium, matplotlib + pytest, jupyter, nbformat, nbconvert
-pip install -e ".[rl]"       # only for RL training: stable-baselines3, sb3-contrib, torch (CPU is enough)
-pytest                       # 129 tests, 15-60 s depending on the installed extras
+pip install -e ".[rl]"       # only for RL training
+pytest                       # 114 tests, 15-60 s depending on the installed extras
 ```
 
-The `-e` flag installs the package in "editable" mode: edits to the source are picked up
-without reinstalling.
+Everything outside the `edgeengine_aware/` package — `data/traces/` (recorded weather),
+`examples/bundles/` (trained policies), `examples/*.ipynb`, `firmware/`, `tools/` — is only
+in the repository, not in the pip package. Releases are tagged `vX.Y.Z` on GitHub and
+published to PyPI automatically (`.github/workflows/publish.yml`).
 
 ## 4. Quick start
 
@@ -580,7 +599,7 @@ docs/                       detailed documentation (see below)
 
 ## 15. Tests
 
-`pytest` runs 129 tests:
+`pytest` runs 114 tests:
 
 | file | what it checks |
 |---|---|
@@ -665,5 +684,19 @@ which mitigation (domain randomisation, configuration, recorded traces) is avail
 
 ## Citation
 
-If you use EdgeEngine AWARE in academic work, please cite the repository (Riccardo Berta,
-DITEN – ELIOS Lab, University of Genoa): https://github.com/measurify/EdgeEngine-AWARE
+If you use EdgeEngine AWARE in academic work, please cite it. The repository carries a
+`CITATION.cff` file (GitHub shows it under *Cite this repository*); in BibTeX:
+
+```bibtex
+@software{berta_edgeengine_aware_2026,
+  author  = {Berta, Riccardo},
+  title   = {EdgeEngine AWARE: an application- and energy-aware simulation environment for
+             reinforcement learning in energy-harvesting Edge IoT systems},
+  year    = {2026},
+  version = {0.4.0},
+  url     = {https://github.com/measurify/EdgeEngine-AWARE},
+  note    = {DITEN -- ELIOS Lab, University of Genoa}
+}
+```
+
+EdgeEngine AWARE is released under the MIT License (see `LICENSE`).

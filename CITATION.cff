@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use EdgeEngine AWARE in academic work, please cite it as below."
+type: software
+title: "EdgeEngine AWARE: an application- and energy-aware simulation environment for reinforcement learning in energy-harvesting Edge IoT systems"
+abstract: >-
+  A Gymnasium environment in which an agent schedules the sensing and the
+  transmissions of an energy-harvesting embedded node from hardware-measurable
+  quantities only. Three application domains (smart agriculture with a solar
+  panel, indoor air quality with an indoor photovoltaic cell, industrial motor
+  monitoring with a thermoelectric generator) share one observation and action
+  contract, and the node-side code has a C translation for deployment.
+authors:
+  - family-names: Berta
+    given-names: Riccardo
+    email: riccardo.berta@unige.it
+    affiliation: "DITEN - ELIOS Lab, University of Genoa"
+    # orcid: "https://orcid.org/XXXX-XXXX-XXXX-XXXX"   # add your ORCID iD here
+version: 0.4.0
+date-released: 2026-09-22
+license: MIT
+repository-code: "https://github.com/measurify/EdgeEngine-AWARE"
+url: "https://github.com/measurify/EdgeEngine-AWARE"
+keywords:
+  - reinforcement-learning
+  - gymnasium
+  - internet-of-things
+  - edge-computing
+  - energy-harvesting
+  - simulation
