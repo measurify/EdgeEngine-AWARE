@@ -307,17 +307,52 @@ else:
     display(M.round(1))
     from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
     cmap = LinearSegmentedColormap.from_list("div", ["#e34948", "#f0efec", "#2a78d6"])
-    lim = float(np.nanmax(np.abs(M.values))) or 1.0
-    fig, ax = plt.subplots(figsize=(6.5, 4))
-    im = ax.imshow(M.values, cmap=cmap, norm=TwoSlopeNorm(0, -lim, lim), aspect="auto")
+    lim = 60.0  # colour scale clipped at ±60 so the informative cells stay readable; the numbers are exact
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    im = ax.imshow(np.clip(M.values, -lim, lim), cmap=cmap, norm=TwoSlopeNorm(0, -lim, lim), aspect="auto")
     ax.set_xticks(range(M.shape[1])); ax.set_xticklabels([f"test: {c}" for c in M.columns], fontsize=9)
     ax.set_yticks(range(M.shape[0])); ax.set_yticklabels([f"trained on {r}" for r in M.index], fontsize=9)
     for i in range(M.shape[0]):
         for j in range(M.shape[1]):
             ax.text(j, i, f"{M.values[i, j]:+.1f}\n±{S.values[i, j]:.1f}", ha="center", va="center", fontsize=9)
-    ax.grid(False); plt.colorbar(im, ax=ax, label="return − rule-based (mean over the test domain's scenarios)")
+    ax.grid(False); plt.colorbar(im, ax=ax, label="return − rule-based\n(mean over the test domain's scenarios; colour clipped at ±60)")
     ax.set_title("Cross-domain transfer of PPO policies"); fig.tight_layout(); plt.show()
     display(X.pivot_table(index="scenario", columns="train", values="advantage", aggfunc="mean").reindex(ALL).round(1))
+""")
+
+md(r"""
+### 4c. Is the indoor win real, or is the rule-based controller just mis-tuned?
+
+The rule-based thresholds (report every 2 h / 1 h / 30 min, a check every hour, economy below
+50 % SoC) were chosen for the agricultural node. In the indoor domain the CO₂ changes within
+half an hour and BLE uplinks are almost free, so a fair comparison also needs a rule re-tuned
+for that domain. The cell below evaluates two re-tuned variants next to the indoor-trained PPO.
+""")
+
+code(r"""
+indoor_scen = [s for s in ALL if s.startswith("indoor_air:")]
+variants = {
+    "rule-based (agriculture tuning)": RuleBasedParams(),
+    "rule-based, fast (30/15/15 min, check 15 min)": RuleBasedParams(report_interval_h=(0.5, 0.25, 0.25), check_interval_h=0.25),
+    "rule-based, fast + late economy (SoC < 20 %)": RuleBasedParams(report_interval_h=(0.5, 0.25, 0.25), check_interval_h=0.25, soc_low=0.2, soc_critical=0.1),
+}
+pols_by_scen = {}
+tuned_rows = []
+for scen in indoor_scen:
+    prof = NodeProfile.from_config(get_scenario(scen))
+    pols = {k: (lambda p=p, prof=prof: RuleBasedPolicy(p, prof)) for k, p in variants.items()}
+    b_in = ROOT / "examples" / "bundles" / "ppo_indoor_air.json"
+    if b_in.exists():
+        m_in = PolicyBundle.load(b_in).model
+        pols["PPO trained on indoor_air (5M)"] = lambda m=m_in: NumpyMLPPolicy(m)
+    tuned_rows += evaluate(pols, [scen], seeds=EVAL_SEEDS)
+T = pd.DataFrame([r.as_dict() for r in tuned_rows])
+tab = T.pivot_table(index="policy", columns="scenario", values="reward", aggfunc="mean")[indoor_scen]
+tab["mean"] = tab.mean(axis=1)
+tab["min SoC"] = T.groupby("policy")["min_soc"].mean()
+tab["uplinks / week"] = T.groupby("policy")["n_tx"].mean()
+tab["readings / week"] = T.groupby("policy")["n_sensing"].mean()
+tab.round(1)
 """)
 
 md(r"""
@@ -338,6 +373,7 @@ for name in DOMAIN_NAMES:
 if runs:
     for tr in M.index:
         lines.append(f"* PPO trained on {tr}: " + ", ".join(f"{te} {M.loc[tr, te]:+.1f}" for te in M.columns) + " vs rule-based.")
+    lines.append("* indoor_air, rule re-tuned for the domain: " + ", ".join(f"{p.split(',')[0] if 'PPO' in p else p}: {tab.loc[p, 'mean']:.1f}" for p in tab.index) + " (mean over the indoor scenarios).")
 print("\n".join(lines))
 """)
 
@@ -353,10 +389,26 @@ md(r"""
   energy and relevance arrive together and vanish together; the industrial node is about
   weekends and faults — plenty of energy while the machine runs, none when it stops, and a drift
   towards the alarm that the node must catch.
-* Cross-domain transfer is the honest test of what a learned policy encodes. A policy that
-  transfers with a small loss has learned the trade-off; one that collapses has learned the
-  solar day. The universal policy (trained on all three) tells whether one network can serve all
-  three nodes — the practical question for a product line.
+* Cross-domain transfer is the honest test of what a learned policy encodes, and the matrix of
+  section 4b answers it in three parts (5 M steps, two training seeds, advantage over the
+  rule-based controller averaged over the test domain's scenarios):
+  * **No transfer without training.** The agriculture policy loses 15–25 points in the other
+    domains; the indoor policy is catastrophic elsewhere (−500 and worse): it learned that
+    transmitting is free (BLE, 1 mJ) and drains a LoRa node's battery in a day. The energy costs
+    *are* in the observation, but a policy that never saw them vary cannot read them.
+  * **Trained in its domain, PPO is at parity with the rule-based controller on the two "physical"
+    domains** (agriculture +2, industrial −4 ± 8) and **far ahead in the indoor domain (+50)**. The
+    indoor node is where the rule's fixed report intervals are most wrong: relevance is bursty
+    (people arrive, CO₂ climbs within half an hour, then nothing for 14 hours) and uplinks are
+    almost free, so the learned policy reports every 15 minutes while the room is occupied and
+    sleeps otherwise. A rule re-tuned for the domain (section 4c) recovers only part of the gap.
+  * **The universal policy** (trained on the mixture of all three) keeps most of the indoor gain
+    (+45) and stays within ~10 points of the rule on the other two — one network can serve three
+    products with a modest loss on each, at two seeds and 5 M steps; more steps and seeds would
+    tell how much of that loss is noise (the seed spread is 8–9 on those cells).
+  * The `industrial:continuous` scenario (24/7 plant, energy-rich) is the one every learned policy
+    loses (−19 to −29): with no weekend to save for, the rule's simple hourly reporting is close to
+    optimal and PPO's caution costs it.
 """)
 
 nb["cells"] = cells

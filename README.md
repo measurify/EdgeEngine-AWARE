@@ -417,8 +417,27 @@ question. First answer: the 5 M-step PPO trained on the agricultural scenarios i
 with the rule-based controller in its own domain but **loses 21 points on the industrial and
 33 on the indoor domain** — it learned the solar day, not only the trade-off.
 `examples/run_cross_domain.sh` trains one policy per domain and a *universal* one on the
-mixture of all three; the notebook builds the train-domain × test-domain matrix from those
-runs. Models and constants of the two new domains: `docs/modeling.md` §6.
+mixture of all three (PPO, 5 M steps, two seeds); the notebook builds the train-domain ×
+test-domain matrix from those runs. Advantage over the rule-based controller, averaged over the
+test domain's scenarios:
+
+| trained on ↓ / tested on → | agriculture | indoor_air | industrial |
+|---|---|---|---|
+| agriculture | **+4** | −24 | −14 |
+| indoor_air | −668 | **+51** | −526 |
+| industrial | −9 | +13 | **−3** |
+| all three (universal) | −6 | +46 | −11 |
+
+Three things to read in it. There is **no transfer without training** — the indoor policy,
+which learned that uplinks are free (1 mJ over BLE), drains a LoRa node's battery in a day.
+**In its own domain PPO is at parity with the rule on the two physical domains and far ahead
+on the indoor one** (+51; a rule re-tuned for the domain recovers only part of it), where
+relevance is bursty and uplinks cheap, so the learned policy reports every 15 minutes while
+the room is occupied and sleeps otherwise. **The universal policy** keeps most of the indoor
+gain and stays within ~10 points of the rule elsewhere: one network can serve three products
+at a modest cost, with two seeds and 5 M steps. The exported policies are shipped in
+`examples/bundles/` (`ppo_indoor_air.json`, `ppo_industrial.json`, `ppo_universal.json`).
+Models and constants of the two new domains: `docs/modeling.md` §6.
 
 ## 11. Recorded traces instead of models
 
@@ -473,9 +492,10 @@ Three pieces make a trained policy deployable:
    profile (all constants), the action encoding, the model parameters (thresholds for the
    rule-based policy, weights for a neural network) and metadata. `export_policy(...)` creates
    it; `rl.export_sb3_mlp(model)` extracts the weights of an SB3 network as plain lists.
-   Three bundles are shipped in `examples/bundles/`: `rule_based_default.json`,
-   `ppo_default.json` (PPO, 2 M steps, network 18→64→64→7) and `ppo_long.json` (PPO, 5 M
-   steps, the best of three seeds).
+   Six bundles are shipped in `examples/bundles/`: `rule_based_default.json`,
+   `ppo_default.json` (PPO, 2 M steps, network 18→64→64→7), `ppo_long.json` (PPO, 5 M steps,
+   agriculture), `ppo_indoor_air.json`, `ppo_industrial.json` and `ppo_universal.json` (PPO,
+   5 M steps, trained on that domain or on all three).
 2. **`deployment.NodeController`** — the firmware main loop written in Python against the
    hardware protocols of `interfaces.py` (clock, energy storage, energy source, sensor,
    radio, application). It reuses the simulator's tracker, observation builder and

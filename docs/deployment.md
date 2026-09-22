@@ -45,9 +45,11 @@ report which policy it runs. A run-time check that the profile matches the board
 constants is *not* implemented: keep them consistent by generating the header from the same
 bundle that was validated.
 
-Three bundles are shipped in `examples/bundles/`: `rule_based_default.json`,
-`ppo_default.json` (the PPO actor of the RL notebook, 2 M steps, network 18→64→64→7) and
-`ppo_long.json` (PPO, 5 M steps, seed 1 of `examples/run_long_training.sh`).
+Six bundles are shipped in `examples/bundles/`: `rule_based_default.json`,
+`ppo_default.json` (the PPO actor of the RL notebook, 2 M steps, network 18→64→64→7),
+`ppo_long.json` (PPO, 5 M steps, agriculture, seed 1 of `examples/run_long_training.sh`) and
+`ppo_indoor_air.json`, `ppo_industrial.json`, `ppo_universal.json` (PPO, 5 M steps, seed 1 of
+`examples/run_cross_domain.sh`, trained on that domain or on all three).
 
 ## 2. Sizes
 
