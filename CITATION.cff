@@ -10,16 +10,15 @@ abstract: >-
   monitoring with a thermoelectric generator) share one observation and action
   contract, and the node-side code has a C translation for deployment.
 authors:
-  - family-names: Berta
-    given-names: Riccardo
-    email: riccardo.berta@unige.it
-    affiliation: "DITEN - ELIOS Lab, University of Genoa"
-    # orcid: "https://orcid.org/XXXX-XXXX-XXXX-XXXX"   # add your ORCID iD here
+  - name: "ELIOS Lab, DITEN, University of Genoa"
+    website: "https://www.elios.unige.it/"
+    city: Genoa
+    country: IT
 version: 0.4.0
 date-released: 2026-09-22
 license: MIT
 repository-code: "https://github.com/measurify/EdgeEngine-AWARE"
-url: "https://github.com/measurify/EdgeEngine-AWARE"
+url: "https://www.elios.unige.it/"
 keywords:
   - reinforcement-learning
   - gymnasium

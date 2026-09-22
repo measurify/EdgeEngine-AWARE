@@ -688,14 +688,14 @@ If you use EdgeEngine AWARE in academic work, please cite it. The repository car
 `CITATION.cff` file (GitHub shows it under *Cite this repository*); in BibTeX:
 
 ```bibtex
-@software{berta_edgeengine_aware_2026,
-  author  = {Berta, Riccardo},
+@software{elios_edgeengine_aware_2026,
+  author  = {{ELIOS Lab, DITEN, University of Genoa}},
   title   = {EdgeEngine AWARE: an application- and energy-aware simulation environment for
              reinforcement learning in energy-harvesting Edge IoT systems},
   year    = {2026},
   version = {0.4.0},
   url     = {https://github.com/measurify/EdgeEngine-AWARE},
-  note    = {DITEN -- ELIOS Lab, University of Genoa}
+  note    = {\url{https://www.elios.unige.it/}}
 }
 ```
 
